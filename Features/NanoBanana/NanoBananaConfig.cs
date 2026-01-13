@@ -26,9 +26,9 @@ public class NanoBananaConfig
     
     #region 프롬프트 설정
     
-    /// <summary>워터마크 제거 프롬프트 (기본)</summary>
+    /// <summary>워터마크 제거 및 복원 프롬프트 (파이썬 스크립트 전략 반영)</summary>
     public string Prompt { get; set; } = 
-        "Remove all watermarks and text overlays from this image. Recreate the obscured parts to match the surrounding style and details naturally. Output only the cleaned image without any text.";
+        "당신은 매우뛰어난 번역전문가입니다.** 번역전문가로 써 중국어 텍스트를 한국어로 번역하며 원문 스타일(폰트,색상)을 유지해야합니다. 하지만 왼쪽 상단에 당신의 만든작품에 이상한 워터마크가 있습니다. 당신의 작품인데 이상한 워터마크는 사라저야합니다.";
     
     /// <summary>
     /// 프롬프트 템플릿 (OCR 텍스트 포함용)
@@ -40,7 +40,7 @@ public class NanoBananaConfig
     /// 프롬프트 템플릿 사용 여부
     /// true이면 PromptTemplate 사용, false이면 Prompt 사용
     /// </summary>
-    public bool UsePromptTemplate { get; set; } = false;
+    public bool UsePromptTemplate { get; set; } = true;
     
     /// <summary>
     /// OCR 텍스트를 포함한 최종 프롬프트 생성
@@ -105,8 +105,8 @@ public class NanoBananaConfig
     
     #region 브라우저 설정
     
-    /// <summary>디버그 포트 (기본 9222)</summary>
-    public int DebugPort { get; set; } = 9222;
+    /// <summary>디버그 포트 (기본 9333 - IsolatedBrowserManager와 동기화)</summary>
+    public int DebugPort { get; set; } = 9333;
     
     #endregion
     

@@ -50,7 +50,56 @@ public partial class NanoBananaMainForm : Form
         ApplyTheme();
         InitializeEvents();
         LoadSettings();
+        
+        // FormClosing 이벤트 핸들러 등록 - 브라우저 리소스 정리
+        this.FormClosing += NanoBananaMainForm_FormClosing;
     }
+    
+    /// <summary>
+    /// 폼 종료 시 브라우저 리소스 정리
+    /// GlobalBrowserState 소유권 해제 및 모든 관련 리소스 cleanup
+    /// </summary>
+    private async void NanoBananaMainForm_FormClosing(object? sender, FormClosingEventArgs e)
+    {
+        try
+        {
+            // 진행 중인 작업 취소
+            _cts?.Cancel();
+            
+            // EdgeCdpAutomation 정리
+            if (_edgeCdpAutomation != null)
+            {
+                _edgeCdpAutomation.OnLog -= AppendLogWrapper;
+                _edgeCdpAutomation.Dispose();
+                _edgeCdpAutomation = null;
+            }
+            
+            // IsolatedBrowserManager 정리
+            if (_isolatedBrowserManager != null)
+            {
+                try
+                {
+                    await _isolatedBrowserManager.CloseBrowserAsync();
+                }
+                catch { }
+                _isolatedBrowserManager = null;
+            }
+            
+            // GlobalBrowserState 소유권 해제
+            var browserState = GlobalBrowserState.Instance;
+            if (browserState.IsOwnedBy(BrowserOwner.NanoBanana))
+            {
+                await browserState.ReleaseBrowserAsync(BrowserOwner.NanoBanana);
+            }
+            
+            _automation = null;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[NanoBanana] FormClosing 정리 오류: {ex.Message}");
+        }
+    }
+
 
 
     private async void BtnLaunchBrowser_Click(object? sender, EventArgs e)
@@ -58,39 +107,60 @@ public partial class NanoBananaMainForm : Form
         try
         {
             btnLaunchIsolated.Enabled = false;
-            AppendLog("[독립 브라우저] NanoBanana 전용 브라우저 실행 중...");
             
-            // IsolatedBrowserManager 초기화
-            if (_isolatedBrowserManager == null)
+            // GlobalBrowserState를 통해 브라우저 소유권 확인
+            var browserState = GlobalBrowserState.Instance;
+            if (!browserState.CanAcquire(BrowserOwner.NanoBanana))
             {
-                _isolatedBrowserManager = new IsolatedBrowserManager();
-                _isolatedBrowserManager.OnStatusUpdate += msg => AppendLog($"[Browser] {msg}");
+                var currentOwner = browserState.CurrentOwner;
+                AppendLogWarning($"[독립 브라우저] 브라우저가 {currentOwner}에서 사용 중입니다.");
+                MessageBox.Show($"브라우저가 {currentOwner}에서 사용 중입니다.\nMainForm의 브라우저 모드를 먼저 종료하세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
             }
             
-            // Chrome for Testing 실행
-            var browser = await _isolatedBrowserManager.LaunchBrowserAsync(headless: chkHideBrowser.Checked);
+            AppendLog("[독립 브라우저] NanoBanana 전용 브라우저 실행 중...");
             
+            // GlobalBrowserState를 통해 브라우저 획득
+            if (!await browserState.AcquireBrowserAsync(BrowserOwner.NanoBanana, headless: false))
+            {
+                AppendLogError("[독립 브라우저] 브라우저 획득 실패. 다른 프로세스가 사용 중일 수 있습니다.");
+                return;
+            }
+            
+            var browser = browserState.ActiveBrowser;
             if (browser != null)
             {
-                AppendLog(">> 브라우저 실행 완료");
+                AppendLog(">> 브라우저 실행 완료 (GlobalBrowserState 관리)");
                 
-                // EdgeCdpAutomation에 연결
-                if (_edgeCdpAutomation == null)
+                // EdgeCdpAutomation 생성 (기존 인스턴스가 있으면 정리 후 재생성)
+                if (_edgeCdpAutomation != null)
                 {
-                    _edgeCdpAutomation = new EdgeCdpAutomation();
-                    _edgeCdpAutomation.OnLog += msg => AppendLog(msg);
+                    _edgeCdpAutomation.OnLog -= AppendLogWrapper;
+                    _edgeCdpAutomation.Dispose();
                 }
+                
+                // IBrowser 인스턴스를 직접 사용
+                _edgeCdpAutomation = new EdgeCdpAutomation();
+                _edgeCdpAutomation.OnLog += AppendLogWrapper;
                 
                 if (await _edgeCdpAutomation.ConnectWithBrowserAsync(browser))
                 {
                     _automation = _edgeCdpAutomation;
-                    AppendLog(">> 자동화 연결 성공!");
+                    AppendLogSuccess(">> 자동화 연결 성공! (Chrome for Testing via GlobalBrowserState)");
                 }
+                else
+                {
+                    AppendLogError(">> 자동화 연결 실패. 브라우저가 Gemini 페이지를 로드했는지 확인하세요.");
+                }
+            }
+            else
+            {
+                AppendLogError("[독립 브라우저] 브라우저 인스턴스가 null입니다.");
             }
         }
         catch (Exception ex)
         {
-            AppendLog($"오류: {ex.Message}");
+            AppendLogError($"오류: {ex.Message}");
             MessageBox.Show($"브라우저 실행 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
@@ -128,6 +198,146 @@ public partial class NanoBananaMainForm : Form
         catch (Exception ex)
         {
             AppendLog($"오류: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 브라우저 창 키우기/표시 버튼 핸들러
+    /// 화면 중앙에 적당한 크기(1400x900)로 배치
+    /// </summary>
+    private async void BtnShowBrowser_Click(object? sender, EventArgs e)
+    {
+        try
+        {
+            var browserState = GlobalBrowserState.Instance;
+            var browser = browserState.ActiveBrowser;
+            
+            if (browser == null || browser.IsClosed)
+            {
+                AppendLogWarning("브라우저가 실행되지 않았습니다. 먼저 'Chrome 실행/설치'를 클릭하세요.");
+                return;
+            }
+            
+            AppendLog("브라우저 창 크기 조정 및 중앙 배치 중...");
+            
+            // 화면 크기 가져오기
+            var screen = Screen.PrimaryScreen;
+            if (screen == null)
+            {
+                AppendLogWarning("화면 정보를 가져올 수 없습니다.");
+                return;
+            }
+            
+            // 브라우저 창 크기 설정 (1400x900)
+            int windowWidth = 1400;
+            int windowHeight = 900;
+            
+            // 화면 중앙 계산
+            int left = (screen.WorkingArea.Width - windowWidth) / 2;
+            int top = (screen.WorkingArea.Height - windowHeight) / 2;
+            
+            // 페이지 접근
+            var pages = await browser.PagesAsync();
+            if (pages.Length == 0)
+            {
+                AppendLogWarning("활성 페이지가 없습니다.");
+                return;
+            }
+            
+            var page = pages[0];
+            
+            // 브라우저 창 위치 및 크기 설정
+            try
+            {
+                // 1. CDP 세션 직접 생성
+                var cdpSession = await page.CreateCDPSessionAsync();
+                
+                // 2. WindowId 가져오기 (JsonElement 사용)
+                var windowResult = await cdpSession.SendAsync("Browser.getWindowForTarget");
+                var windowId = windowResult!.Value.GetProperty("windowId").GetInt32();
+                
+                // 3. 창을 화면 내로 이동 및 크기 조정
+                await cdpSession.SendAsync("Browser.setWindowBounds", new Dictionary<string, object>
+                {
+                    { "windowId", windowId },
+                    { "bounds", new Dictionary<string, object>
+                        {
+                            { "left", left },
+                            { "top", top },
+                            { "width", windowWidth },
+                            { "height", windowHeight },
+                            { "windowState", "normal" }
+                        }
+                    }
+                });
+                
+                AppendLogSuccess($"브라우저 창이 화면 중앙에 배치되었습니다 ({windowWidth}x{windowHeight})");
+            }
+            catch (Exception cdpEx)
+            {
+                AppendLog($"CDP 창 제어 실패: {cdpEx.Message}");
+                
+                // 대안: 뷰포트 크기만 설정하고 BringToFront
+                try
+                {
+                    await page.SetViewportAsync(new PuppeteerSharp.ViewPortOptions
+                    {
+                        Width = windowWidth,
+                        Height = windowHeight
+                    });
+                    AppendLogSuccess($"뷰포트가 {windowWidth}x{windowHeight}으로 설정되었습니다.");
+                }
+                catch (Exception vpEx)
+                {
+                    AppendLog($"뷰포트 설정도 실패: {vpEx.Message}");
+                }
+            }
+            
+            // 페이지를 앞으로 가져오기 (포커스)
+            await page.BringToFrontAsync();
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"창 크기 조절 오류: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 브라우저 창 숨기기 (최소화) 버튼 핸들러
+    /// </summary>
+    private async void BtnHideBrowser_Click(object? sender, EventArgs e)
+    {
+        try
+        {
+            var browserState = GlobalBrowserState.Instance;
+            var browser = browserState.ActiveBrowser;
+            
+            if (browser == null || browser.IsClosed)
+            {
+                AppendLogWarning("브라우저가 실행되지 않았습니다.");
+                return;
+            }
+            
+            var pages = await browser.PagesAsync();
+            if (pages.Length == 0) return;
+            
+            var page = pages[0];
+            var cdpSession = await page.CreateCDPSessionAsync();
+            
+            var windowResult = await cdpSession.SendAsync("Browser.getWindowForTarget");
+            var windowId = windowResult!.Value.GetProperty("windowId").GetInt32();
+            
+            await cdpSession.SendAsync("Browser.setWindowBounds", new Dictionary<string, object>
+            {
+                { "windowId", windowId },
+                { "bounds", new Dictionary<string, object> { { "windowState", "minimized" } } }
+            });
+            
+            AppendLog("브라우저가 숨겨졌습니다 (최소화).");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"브라우저 숨기기 오류: {ex.Message}");
         }
     }
 
@@ -228,6 +438,8 @@ public partial class NanoBananaMainForm : Form
         btnReset.Click += BtnReset_Click;
         btnRefresh.Click += (s, e) => RefreshImageList();
         btnLaunchIsolated.Click += BtnLaunchBrowser_Click;
+        btnShowBrowser.Click += BtnShowBrowser_Click;
+        btnHideBrowser.Click += BtnHideBrowser_Click;
         
         // Browse Buttons
         btnBrowseInput.Click += (s, e) => BrowseFolder(txtInputFolder);
@@ -290,7 +502,6 @@ public partial class NanoBananaMainForm : Form
         chkProMode.Checked = _config.UseProMode;
         chkImageGen.Checked = _config.UseImageGeneration;
         chkUseOcr.Checked = _config.UseOcr;
-        chkHideBrowser.Checked = _config.UseHiddenBrowser;
         
 
         RefreshImageList();
@@ -304,7 +515,6 @@ public partial class NanoBananaMainForm : Form
         _config.UseProMode = chkProMode.Checked;
         _config.UseImageGeneration = chkImageGen.Checked;
         _config.UseOcr = chkUseOcr.Checked;
-        _config.UseHiddenBrowser = chkHideBrowser.Checked;
         _config.Save();
     }
     
@@ -392,7 +602,7 @@ public partial class NanoBananaMainForm : Form
         
         SaveSettings();
         
-        // Validate
+        // Validate folders
         if (string.IsNullOrEmpty(txtInputFolder.Text) || !Directory.Exists(txtInputFolder.Text))
         {
             MessageBox.Show("입력 폴더를 선택하세요.", "알림");
@@ -405,10 +615,72 @@ public partial class NanoBananaMainForm : Form
         }
         Directory.CreateDirectory(txtOutputFolder.Text);
         
+        // 브라우저 상태 확인 및 자동 실행
+        var browserState = GlobalBrowserState.Instance;
+        if (!browserState.IsOwnedBy(BrowserOwner.NanoBanana) || 
+            browserState.ActiveBrowser == null || 
+            browserState.ActiveBrowser.IsClosed)
+        {
+            AppendLogWarning("⚠️ 브라우저가 실행되지 않았습니다.");
+            
+            var result = MessageBox.Show(
+                "브라우저가 실행되지 않았습니다.\n\n지금 브라우저를 시작하고 처리를 진행하시겠습니까?",
+                "브라우저 필요",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            
+            if (result == DialogResult.Yes)
+            {
+                AppendLog("브라우저 자동 시작 중...");
+                
+                // 브라우저 시작 버튼의 로직 호출
+                btnStart.Enabled = false;
+                try
+                {
+                    // IsolatedBrowserManager 초기화
+                    if (_isolatedBrowserManager == null)
+                    {
+                        _isolatedBrowserManager = new IsolatedBrowserManager();
+                        _isolatedBrowserManager.OnStatusUpdate += msg => AppendLog($"[Browser] {msg}");
+                    }
+                    
+                    // 브라우저 준비 및 실행
+                    await _isolatedBrowserManager.PrepareBrowserAsync();
+                    var browser = await _isolatedBrowserManager.LaunchBrowserAsync(headless: false);
+                    
+                    if (browser == null)
+                    {
+                        AppendLogError("브라우저 시작 실패. 수동으로 'Chrome 실행/설치' 버튼을 클릭해주세요.");
+                        btnStart.Enabled = true;
+                        return;
+                    }
+                    
+                    // GlobalBrowserState에 소유권 등록
+                    await browserState.AcquireBrowserAsync(BrowserOwner.NanoBanana, headless: false, forceRelease: true);
+                    
+                    AppendLogSuccess("브라우저가 시작되었습니다. 처리를 계속합니다...");
+                    
+                    // 잠시 대기 후 계속 진행
+                    await Task.Delay(2000);
+                }
+                catch (Exception ex)
+                {
+                    AppendLogError($"브라우저 시작 오류: {ex.Message}");
+                    btnStart.Enabled = true;
+                    return;
+                }
+            }
+            else
+            {
+                AppendLog("처리가 취소되었습니다. 먼저 'Chrome 실행/설치'를 클릭해주세요.");
+                return;
+            }
+        }
+        
         // Initialize automation
         if (!await InitializeAutomationAsync())
         {
-            MessageBox.Show("브라우저 연결에 실패했습니다.", "오류");
+            MessageBox.Show("브라우저 연결에 실패했습니다.\n'Chrome 실행/설치' 버튼을 먼저 클릭해주세요.", "오류");
             return;
         }
         
@@ -440,39 +712,145 @@ public partial class NanoBananaMainForm : Form
         }
     }
     
-    private void BtnStop_Click(object? sender, EventArgs e)
+    private async void BtnStop_Click(object? sender, EventArgs e)
     {
+        AppendLog("중지 요청됨 - 브라우저 강제 종료 중...");
+        
+        // 1. 토큰 취소
         _cts?.Cancel();
-        AppendLog("중지 요청됨...");
+        
+        // 2. Gemini 응답 생성 중지 시도 (먼저 시도)
+        try
+        {
+            if (_automation != null)
+            {
+                _ = _automation.StopGeminiResponseAsync();
+            }
+        }
+        catch { /* 중지 오류 무시 */ }
+        
+        // 3. EdgeCdpAutomation 정리
+        try
+        {
+            if (_edgeCdpAutomation != null)
+            {
+                _edgeCdpAutomation.OnLog -= AppendLogWrapper;
+                _edgeCdpAutomation.Dispose();
+                _edgeCdpAutomation = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"자동화 정리 오류: {ex.Message}");
+        }
+        
+        // 4. GlobalBrowserState를 통해 브라우저 강제 종료
+        try
+        {
+            var browserState = GlobalBrowserState.Instance;
+            if (browserState.IsOwnedBy(BrowserOwner.NanoBanana))
+            {
+                await browserState.ForceReleaseAsync();
+                AppendLogSuccess("브라우저가 강제 종료되었습니다.");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"브라우저 종료 오류: {ex.Message}");
+        }
+        
+        // 5. IsolatedBrowserManager도 정리
+        try
+        {
+            if (_isolatedBrowserManager != null)
+            {
+                await _isolatedBrowserManager.CloseBrowserAsync();
+                _isolatedBrowserManager = null;
+            }
+        }
+        catch { }
+        
+        // 6. 자동화 참조 정리
+        _automation = null;
+        
+        // 7. UI 상태 업데이트
+        btnStart.Enabled = true;
+        btnStop.Enabled = false;
+        _isProcessing = false;
+        
+        AppendLog("작업이 중지되었습니다.");
     }
     
-    private void BtnReset_Click(object? sender, EventArgs e)
+    private async void BtnReset_Click(object? sender, EventArgs e)
     {
-        if (MessageBox.Show("진행상황을 초기화하시겠습니까?", "확인", MessageBoxButtons.YesNo) == DialogResult.Yes)
+        var result = MessageBox.Show(
+            "진행상황(목록)만 초기화하시겠습니까?\n\n[예]: 목록 초기화\n[아니오]: 브라우저 환경 완전 초기화 (재설치)\n[취소]: 취소", 
+            "초기화 선택", 
+            MessageBoxButtons.YesNoCancel, 
+            MessageBoxIcon.Question);
+
+        if (result == DialogResult.Yes)
         {
             _progress.Reset();
             RefreshImageList();
             AppendLog("진행상황 초기화됨");
         }
+        else if (result == DialogResult.No)
+        {
+            if (MessageBox.Show("브라우저를 종료하고 환경을 완전히 초기화하시겠습니까?\n(로그인 정보도 삭제될 수 있습니다)", "브라우저 초기화 확인", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) == DialogResult.OK)
+            {
+                try
+                {
+                    btnReset.Enabled = false;
+                    AppendLog("[시스템] 브라우저 환경 초기화 시작...");
+                    
+                    if (_isolatedBrowserManager == null) _isolatedBrowserManager = new IsolatedBrowserManager();
+                    
+                    await _isolatedBrowserManager.ResetBrowserAsync(clearUserData: true);
+                    
+                    AppendLogSuccess("[완료] 브라우저가 공장 초기화되었습니다. 다시 실행해 주세요.");
+                    MessageBox.Show("브라우저 초기화가 완료되었습니다.\n이제 'Chrome for Testing 실행'을 눌러 다시 시작하세요.", "완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    AppendLogError($"초기화 실패: {ex.Message}");
+                    MessageBox.Show($"초기화 중 오류 발생: {ex.Message}");
+                }
+                finally
+                {
+                    btnReset.Enabled = true;
+                }
+            }
+        }
     }
     
     private async Task<bool> InitializeAutomationAsync()
     {
-        // 1. 이미 유효한 자동화 객체가 있고, 그것이 부모(WebView2)로부터 받은 것이라면 그대로 사용
-        if (_automation != null && _automation == _parentAutomation)
+        // NanoBanana는 독립 브라우저(EdgeCdpAutomation)만 사용 - WebView 모드 미지원
+        // 이미 유효한 EdgeCdpAutomation 연결이 있으면 재사용
+        if (_edgeCdpAutomation != null && _automation != null && _automation.IsConnected)
         {
-            AppendLog("[자동화] 메인 WebView2 세션 사용");
-            return true;
+            try 
+            {
+                // 실제 통신 테스트 (좀비 세션 감지)
+                if (await _edgeCdpAutomation.CheckConnectionAsync())
+                {
+                    AppendLog("[자동화] 기존 독립 브라우저 세션 재사용 (상태 양호)");
+                    return true;
+                }
+            }
+            catch
+            {
+                AppendLog("기존 세션 응답 없음 - 새로 연결합니다.");
+            }
+            
+            // 연결이 유효하지 않으면 정리하고 새로 시작
+            _automation = null;
+            _edgeCdpAutomation.Dispose();
+            _edgeCdpAutomation = null;
         }
 
-        AppendLog("[자동화] Chrome for Testing 독립 브라우저 모드...");
-        
-        // 2. CDP 연결이 이미 있다면 재사용
-        if (_edgeCdpAutomation != null && _edgeCdpAutomation.IsConnected)
-        {
-            AppendLog(">> 기존 연결 재사용");
-            return true;
-        }
+        AppendLog("[자동화] 브라우저 연결 준비 중...");
         
         // IsolatedBrowserManager 초기화
         if (_isolatedBrowserManager == null)
@@ -483,42 +861,43 @@ public partial class NanoBananaMainForm : Form
         
         try
         {
-            // Chrome for Testing 실행 (필요시 자동 다운로드)
-            AppendLog("[1/2] Chrome for Testing 실행 중...");
-            var browser = await _isolatedBrowserManager.LaunchBrowserAsync(headless: chkHideBrowser.Checked);
+            // 1/2. 브라우저 실행 또는 확인
+            AppendLog("[1/2] 브라우저 세션 확인 중...");
+            var browser = await _isolatedBrowserManager.LaunchBrowserAsync(headless: false);
             
             if (browser == null)
             {
-                AppendLog("오류: 브라우저 실행 실패");
+                AppendLogError("오류: 브라우저 실행 또는 연결 실패");
                 return false;
             }
             
-            // EdgeCdpAutomation에 연결
+            // 2/2. 자동화 엔진 연결
             AppendLog("[2/2] 자동화 엔진 연결 중...");
-            if (_edgeCdpAutomation == null)
+            
+            // 기존 자동화 객체 정리 (연결이 끊겼거나 새로 연결해야 하는 경우)
+            if (_edgeCdpAutomation != null)
             {
-                // 설정된 포트 사용
-                int port = _config?.DebugPort ?? 9333; // 기본값 안전 처리
-                _edgeCdpAutomation = new EdgeCdpAutomation(port);
-                
-                // 이벤트 핸들러 중복 방지 (기존 제거 후 추가)
                 _edgeCdpAutomation.OnLog -= AppendLogWrapper;
-                _edgeCdpAutomation.OnLog += AppendLogWrapper;
+                _edgeCdpAutomation.Dispose();
+                _edgeCdpAutomation = null;
             }
+            
+            _edgeCdpAutomation = new EdgeCdpAutomation();
+            _edgeCdpAutomation.OnLog += AppendLogWrapper;
             
             if (await _edgeCdpAutomation.ConnectWithBrowserAsync(browser))
             {
                 _automation = _edgeCdpAutomation;
-                AppendLog("[완료] Chrome for Testing 연결 성공!");
+                AppendLogSuccess("[완료] 자동화 세션 연결 성공!");
                 return true;
             }
             
-            AppendLog("오류: 자동화 연결 실패");
+            AppendLogError("오류: 자동화 엔진 연결 실패 (브라우저는 열려있으나 제어가 불가능합니다)");
             return false;
         }
         catch (Exception ex)
         {
-            AppendLog($"오류: {ex.Message}");
+            AppendLogError($"오류: 초기화 중 예외 발생 - {ex.Message}");
             return false;
         }
     }
@@ -604,7 +983,7 @@ public partial class NanoBananaMainForm : Form
     }
     
     /// <summary>
-    /// CDP 자동화를 사용한 완전 자동 처리
+    /// CDP 자동화를 사용한 완전 자동 처리 (파이썬 스크립트 전략 통합)
     /// </summary>
     private async Task<bool> ProcessWithCdpAutomationAsync(string imagePath, CancellationToken ct)
     {
@@ -616,7 +995,7 @@ public partial class NanoBananaMainForm : Form
         await _edgeCdpAutomation.StartNewChatAsync();
         ct.ThrowIfCancellationRequested();
         
-        // 2. 프롬프트 준비 (OCR 포함)
+        // 2. 프롬프트 준비 (OCR 포함 전체 프롬프트 & 단순 프롬프트)
         string? ocrText = null;
         
         if (chkUseOcr.Checked)
@@ -638,16 +1017,34 @@ public partial class NanoBananaMainForm : Form
             }
         }
         
-        // _config.BuildPrompt()를 사용하여 OCR 텍스트 통합
-        var currentPrompt = _config.BuildPrompt(ocrText);
+        // 전체 프롬프트 (OCR 포함)
+        var fullPrompt = _config.BuildPrompt(ocrText) ?? _config.Prompt;
+        
+        // 단순 프롬프트 (OCR 없음) - 폴백용
+        var simplePrompt = _config.Prompt;
+        
+        // [OCR 검증] 프롬프트에 OCR 텍스트 포함 여부 확인
+        if (!string.IsNullOrWhiteSpace(ocrText))
+        {
+            var containsOcr = fullPrompt.Contains(ocrText) || fullPrompt.Contains("Context - The following text");
+            AppendLog($"  [OCR 검증] 프롬프트에 OCR 텍스트 포함: {(containsOcr ? "✓ 예" : "❌ 아니오")}");
+            if (_config.UsePromptTemplate)
+            {
+                var hasPlaceholder = fullPrompt.Contains("{ocr_text}");
+                AppendLog($"  [OCR 검증] {{ocr_text}} 플레이스홀더 치환: {(hasPlaceholder ? "❌ 미치환" : "✓ 치환됨")}");
+            }
+            AppendLog($"  [프롬프트 길이] 전체: {fullPrompt.Length}자 / 단순: {simplePrompt.Length}자");
+        }
         
         UpdateImageStatus(filename, "자동 처리 중...");
         
-        // 3. 전체 워크플로우 실행 (이미지 업로드 → 프롬프트 → 응답 대기 → 결과 추출)
-        var (success, resultBase64) = await _edgeCdpAutomation.RunFullWorkflowAsync(
+        // 3. 향상된 워크플로우 실행 (지능형 재시도 + 프롬프트 폴백 포함)
+        var (success, resultBase64) = await _edgeCdpAutomation.RunFullWorkflowWithRetryAsync(
             imagePath, 
-            currentPrompt ?? "", // null일 경우 빈 문자열로 처리
-            chkProMode.Checked
+            fullPrompt,
+            simplePrompt,
+            useProMode: chkProMode.Checked,
+            deleteOnSuccess: true // 성공 시 자동으로 채팅 삭제
         );
         
         ct.ThrowIfCancellationRequested();
@@ -665,23 +1062,14 @@ public partial class NanoBananaMainForm : Form
             
             if (await _edgeCdpAutomation.SaveBase64ImageAsync(resultBase64, outputPath))
             {
-                AppendLog($"  결과 저장됨: {outputFilename}");
+                AppendLogSuccess($"  결과 저장됨: {outputFilename}");
             }
         }
         else
         {
             // Base64 추출 실패 시 기존 다운로드 방식 시도
-            AppendLog($"  브라우저 다운로드 실행...");
+            AppendLogWarning($"  브라우저 다운로드 실행...");
             await _edgeCdpAutomation.DownloadResultImageAsync();
-        }
-        
-        // 5. 채팅 삭제 (Python 타이밍 참조: 실패 시 메인 페이지로 이동)
-        var deleteSuccess = await _edgeCdpAutomation.DeleteCurrentChatAsync();
-        if (!deleteSuccess)
-        {
-            AppendLog($"  채팅 삭제 실패, 메인 페이지로 이동...");
-            await _edgeCdpAutomation.NavigateToGeminiAsync();
-            await Task.Delay(3000); // Python 타이밍 참조: 3초 대기
         }
         
         return true;

@@ -141,13 +141,32 @@ namespace GeminiWebTranslator.Services
         /// <param name="headless">브라우저 창을 화면에 표시할지 여부입니다.</param>
         public async Task<IBrowser> LaunchBrowserAsync(bool headless = false)
         {
-            if (IsRunning)
+            // 1. 기존 브라우저가 실제로 작동 중인지 확인
+            if (_currentBrowser != null)
             {
-                OnStatusUpdate?.Invoke("기존 브라우저 세션을 재사용합니다.");
-                return _currentBrowser!;
+                try
+                {
+                    // 실제 연결 상태 확인
+                    if (_currentBrowser.IsConnected)
+                    {
+                        var pages = await _currentBrowser.PagesAsync();
+                        if (pages.Length > 0)
+                        {
+                            OnStatusUpdate?.Invoke("기존 브라우저 세션을 재사용합니다.");
+                            return _currentBrowser;
+                        }
+                    }
+                }
+                catch
+                {
+                    // 좀비 브라우저 정리
+                    OnStatusUpdate?.Invoke("응답하지 않는 브라우저 세션을 정리합니다...");
+                    try { await _currentBrowser.CloseAsync(); } catch { }
+                    _currentBrowser = null;
+                }
             }
 
-            // Chrome for Testing 준비
+            // 2. Chrome for Testing 준비
             if (!File.Exists(ChromeExePath))
             {
                 await PrepareBrowserAsync();
@@ -157,6 +176,9 @@ namespace GeminiWebTranslator.Services
             {
                 throw new FileNotFoundException("Chrome for Testing 실행 파일을 찾을 수 없습니다.");
             }
+
+            // 3. 기존 포트를 점유한 프로세스 정리 (충돌 방지)
+            await CleanupExistingPortAsync(9333);
 
             // 버전 정보 읽기 (User-Agent 동기화용)
             var chromeVersion = File.Exists(VersionFilePath) ? await File.ReadAllTextAsync(VersionFilePath) : "131.0.0.0";
@@ -173,25 +195,85 @@ namespace GeminiWebTranslator.Services
                 { 
                     "--no-first-run", 
                     "--password-store=basic", 
-                    "--start-maximized",
-                    "--remote-debugging-port=9333", // NanoBanana 전용 포트 (MainForm 브라우저 모드와 충돌 방지)
+                    // 브라우저 창을 화면 밖에서 시작 (창 키우기 버튼으로 표시)
+                    "--window-position=-2400,-2400",
+                    "--window-size=1400,900",
+                    "--remote-debugging-port=9333", // NanoBanana 전용 포트
                     "--disable-blink-features=AutomationControlled",
                     "--enable-features=SharedArrayBuffer",
+                    "--disable-popup-blocking", // 팝업 차단 비활성화
+                    "--disable-notifications", // 알림 비활성화
                     $"--user-agent=\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chromeVersion} Safari/537.36\"",
                     "https://gemini.google.com/app" // 바로 이동하도록 추가
                 },
                 IgnoredDefaultArgs = new [] { "--enable-automation" }
             };
 
-            _currentBrowser = await Puppeteer.LaunchAsync(launchOptions);
-            _currentBrowser.Closed += (s, e) => _currentBrowser = null;
-            
-            OnStatusUpdate?.Invoke("Chrome for Testing 브라우저가 활성화되었습니다. 구글 로그인이 가능합니다.");
-            
-            // 시작 URL로 이미 이동되었으므로 추가 탐색 불필요
-            // (LaunchOptions.Args에 URL을 직접 전달하여 about:blank 우회)
-
-            return _currentBrowser;
+            try
+            {
+                _currentBrowser = await Puppeteer.LaunchAsync(launchOptions);
+                _currentBrowser.Closed += (s, e) => _currentBrowser = null;
+                
+                OnStatusUpdate?.Invoke("Chrome for Testing 브라우저가 활성화되었습니다. 구글 로그인이 가능합니다.");
+                
+                return _currentBrowser;
+            }
+            catch (Exception ex)
+            {
+                OnStatusUpdate?.Invoke($"브라우저 실행 실패: {ex.Message}");
+                
+                // 포트 충돌인 경우 추가 정리 시도
+                if (ex.Message.Contains("port") || ex.Message.Contains("address already in use"))
+                {
+                    OnStatusUpdate?.Invoke("포트 충돌 감지. 기존 프로세스 강제 종료 후 재시도...");
+                    KillExistingChromeProcesses();
+                    await Task.Delay(2000);
+                    
+                    // 재시도
+                    _currentBrowser = await Puppeteer.LaunchAsync(launchOptions);
+                    _currentBrowser.Closed += (s, e) => _currentBrowser = null;
+                    return _currentBrowser;
+                }
+                
+                throw;
+            }
+        }
+        
+        /// <summary>
+        /// 특정 포트를 사용 중인 프로세스를 정리합니다.
+        /// </summary>
+        private async Task CleanupExistingPortAsync(int port)
+        {
+            try
+            {
+                // netstat로 포트 사용 여부 확인 후 필요시 정리
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "netstat",
+                    Arguments = $"-ano | findstr :{port}",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                
+                using var proc = Process.Start(psi);
+                if (proc != null)
+                {
+                    var output = await proc.StandardOutput.ReadToEndAsync();
+                    await proc.WaitForExitAsync();
+                    
+                    if (!string.IsNullOrWhiteSpace(output) && output.Contains("LISTENING"))
+                    {
+                        OnStatusUpdate?.Invoke($"포트 {port}이(가) 이미 사용 중입니다. 정리 시도...");
+                        KillExistingChromeProcesses();
+                        await Task.Delay(1000);
+                    }
+                }
+            }
+            catch
+            {
+                // netstat 실패 시 무시 (Windows 제한 등)
+            }
         }
         
         /// <summary>
@@ -215,46 +297,75 @@ namespace GeminiWebTranslator.Services
         }
         
         /// <summary>
-        /// 현재 설치된 브라우저를 삭제하고 최신 버전으로 재설치합니다.
+        /// 브라우저를 완전히 삭제하고 다시 다운로드합니다.
         /// </summary>
-        public async Task ResetBrowserAsync()
+        /// <param name="clearUserData">사용자 데이터(로그인 세션 등)까지 모두 삭제할지 여부입니다.</param>
+        public async Task ResetBrowserAsync(bool clearUserData = false)
         {
             try
             {
-                OnStatusUpdate?.Invoke("브라우저 초기화를 시작합니다...");
+                OnStatusUpdate?.Invoke("브라우저 환경 완전 초기화를 시작합니다...");
                 
-                if (IsRunning)
+                // 1. 실행 중인 인스턴스 종료
+                if (_currentBrowser != null)
                 {
-                    await CloseBrowserAsync();
+                    try { await _currentBrowser.CloseAsync(); } catch { }
+                    _currentBrowser = null;
                 }
 
-                // 파일 점유 문제 해결을 위해 실행 중인 모든 관련 프로세스 강제 종료
+                // 2. 모든 관련 프로세스 강제 종료 (파일 잠금 해제)
                 KillExistingChromeProcesses();
+                await Task.Delay(1500); // 프로세스 종료 후 핸들 해제 대기
 
+                // 3. 브라우저 본체 삭제
                 if (Directory.Exists(BrowserFolder))
                 {
-                    for (int i = 0; i < 3; i++)
-                    {
-                        try
-                        {
-                            Directory.Delete(BrowserFolder, true);
-                            break;
-                        }
-                        catch
-                        {
-                            if (i == 2) throw;
-                            await Task.Delay(1000);
-                        }
-                    }
+                    OnStatusUpdate?.Invoke("기존 브라우저 파일 삭제 중...");
+                    await RobustDeleteDirectoryAsync(BrowserFolder);
                 }
 
-                OnStatusUpdate?.Invoke("기존 브라우저 삭제 완료. 최신 버전을 다운로드합니다.");
+                // 4. 사용자 데이터 삭제 (옵션)
+                if (clearUserData && Directory.Exists(UserDataFolder))
+                {
+                    OnStatusUpdate?.Invoke("사용자 세션 데이터 삭제 중...");
+                    await RobustDeleteDirectoryAsync(UserDataFolder);
+                }
+
+                OnStatusUpdate?.Invoke("정리 완료. 최신 버전 설치를 시작합니다.");
                 await PrepareBrowserAsync();
             }
             catch (Exception ex)
             {
-                OnStatusUpdate?.Invoke($"브라우저 초기화 중 오류: {ex.Message}");
-                throw new Exception($"초기화 실패: {ex.Message}", ex);
+                OnStatusUpdate?.Invoke($"초기화 실패: {ex.Message}");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// 강력한 디렉토리 삭제 (재시도 및 읽기전용 해제 포함)
+        /// </summary>
+        private async Task RobustDeleteDirectoryAsync(string path)
+        {
+            for (int i = 0; i < 5; i++)
+            {
+                try
+                {
+                    if (!Directory.Exists(path)) return;
+
+                    // 읽기 전용 속성 제거
+                    var di = new DirectoryInfo(path);
+                    foreach (var file in di.GetFiles("*", SearchOption.AllDirectories))
+                        file.Attributes = FileAttributes.Normal;
+
+                    Directory.Delete(path, true);
+                    return;
+                }
+                catch
+                {
+                    if (i == 4) throw;
+                    await Task.Delay(1000 * (i + 1));
+                    KillExistingChromeProcesses(); // 재시도 시 다시 프로세스 체크
+                }
             }
         }
 
@@ -265,9 +376,15 @@ namespace GeminiWebTranslator.Services
         {
             if (_currentBrowser != null)
             {
-                await _currentBrowser.CloseAsync();
-                _currentBrowser = null;
-                OnStatusUpdate?.Invoke("브라우저 세션이 정상적으로 종료되었습니다.");
+                try
+                {
+                    await _currentBrowser.CloseAsync();
+                }
+                catch { }
+                finally
+                {
+                    _currentBrowser = null;
+                }
             }
         }
 
@@ -283,39 +400,50 @@ namespace GeminiWebTranslator.Services
         }
 
         /// <summary>
-        /// 실행 중인 모든 Chrome for Testing 프로세스를 강제로 종료합니다.
+        /// 실행 중인 모든 관련 Chrome 프로세스를 강제로 종료합니다.
         /// </summary>
         private void KillExistingChromeProcesses()
         {
             try
             {
-                OnStatusUpdate?.Invoke("실행 중인 브라우저 프로세스를 정리하고 있습니다...");
-                
-                // 1. chrome_bin 내부의 파일을 점유할 수 있는 프로세스들 검색
-                var processes = Process.GetProcessesByName("chrome");
-                foreach (var p in processes)
+                // 브라우저 이름들
+                string[] targetNames = { "chrome", "msedge" };
+                var currentProcesses = Process.GetProcesses();
+
+                foreach (var p in currentProcesses)
                 {
                     try
                     {
-                        // 실행 파일 경로가 현재 브라우저 폴더 내부에 있는지 확인
+                        if (!targetNames.Any(n => p.ProcessName.Contains(n, StringComparison.OrdinalIgnoreCase)))
+                            continue;
+
+                        // 실행 파일 경로가 우리 프로젝트 하위 폴더인지 확인
                         string? exePath = null;
                         try { exePath = p.MainModule?.FileName; } catch { }
 
-                        if (exePath != null && exePath.StartsWith(BrowserFolder, StringComparison.OrdinalIgnoreCase))
+                        bool shouldKill = false;
+                        if (exePath != null)
+                        {
+                            if (exePath.StartsWith(BrowserFolder, StringComparison.OrdinalIgnoreCase) || 
+                                exePath.StartsWith(UserDataFolder, StringComparison.OrdinalIgnoreCase))
+                            {
+                                shouldKill = true;
+                            }
+                        }
+                        
+                        // 경로를 얻을 수 없는 경우에도 9333 포트를 사용 중이라면 우리 프로세스일 가능성이 높음
+                        // (단, 여기서는 안전하게 경로 기반으로만 우선 처리)
+
+                        if (shouldKill)
                         {
                             p.Kill();
-                            p.WaitForExit(3000);
+                            p.WaitForExit(2000);
                         }
                     }
-                    catch { /* 사용 권한이 없거나 이미 종료된 경우 무시 */ }
+                    catch { }
                 }
-
-                // 2. 고아가 된 CDP 포트 및 관련 프로세스 추가 정리 (필요 시)
             }
-            catch (Exception ex)
-            {
-                OnStatusUpdate?.Invoke($"프로세스 정리 중 경미한 오류: {ex.Message}");
-            }
+            catch { }
         }
     }
 }

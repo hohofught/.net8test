@@ -27,8 +27,10 @@ jobs:
     - name: Build
       run: dotnet build --no-restore -c Release
 
-    - name: Publish
-      run: dotnet publish -c Release -r win-x64 --self-contained false -o ./publish
+    # Standalone Single-File 빌드 (.NET 런타임 없이 실행 가능)
+    - name: Publish Standalone
+      run: |
+        dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o ./publish
 
     # Resources 폴더와 실행파일을 압축하기 위해 PowerShell 사용
     - name: Zip Release

@@ -4,131 +4,14 @@
  * CDP를 통해 Gemini 웹페이지에 주입되어 이미지 처리 자동화를 수행합니다.
  * EdgeCdpAutomation.cs에서 EvaluateFunctionAsync로 호출됩니다.
  * 
+ * 의존성: GeminiCommon.js (먼저 로드되어야 함)
  * 사용법: 각 함수를 CDP를 통해 개별적으로 호출
  */
 
 const NanoBanana = {
-    // ========== 유틸리티 (Antigravity 에이전틱 자동화 규격) ==========
-
-    /**
-     * Shadow DOM 내부까지 탐색하는 단일 요소 선택자
-     */
-    queryShadowSelector: function (selector, root = document) {
-        const parts = selector.split('>>>');
-        let current = root;
-        for (let i = 0; i < parts.length; i++) {
-            const part = parts[i].trim();
-            if (i > 0) current = current.shadowRoot || current;
-            current = current.querySelector(part);
-            if (!current) break;
-        }
-        return current;
-    },
-
-    /**
-     * Shadow DOM 내부까지 탐색하는 다중 요소 선택자
-     */
-    queryShadowSelectorAll: function (selector, root = document) {
-        const parts = selector.split('>>>');
-        let currentRoots = [root];
-        let lastElements = [];
-
-        for (let i = 0; i < parts.length; i++) {
-            const part = parts[i].trim();
-            const nextRoots = [];
-            lastElements = [];
-
-            for (const r of currentRoots) {
-                const target = i > 0 ? (r.shadowRoot || r) : r;
-                const found = target.querySelectorAll(part);
-                for (const el of found) {
-                    lastElements.push(el);
-                    nextRoots.push(el);
-                }
-            }
-            currentRoots = nextRoots;
-            if (currentRoots.length === 0) break;
-        }
-        return lastElements;
-    },
-
-    /**
-     * 요소가 가시적이고 상호작용 가능한지 확인
-     */
-    isInteractable: function (el) {
-        if (!el) return false;
-        const style = window.getComputedStyle(el);
-        return el.offsetParent !== null &&
-            style.display !== 'none' &&
-            style.visibility !== 'hidden' &&
-            style.opacity !== '0' &&
-            !el.disabled;
-    },
-
-    /**
-     * 요소가 나타날 때까지 대기 (Shadow DOM 지원)
-     */
-    waitForElement: async function (selector, timeout = 15000) {
-        const startTime = Date.now();
-        console.log(`[NanoBanana] Waiting for: ${selector}`);
-        while (Date.now() - startTime < timeout) {
-            const el = selector.includes('>>>') ? this.queryShadowSelector(selector) : document.querySelector(selector);
-            if (el && this.isInteractable(el)) return el;
-            await new Promise(r => setTimeout(r, 300));
-        }
-        console.warn(`[NanoBanana] Timeout waiting for: ${selector}`);
-        return null;
-    },
-
-    /**
-     * 짧은 딜레이
-     */
-    delay: function (ms) {
-        return new Promise(r => setTimeout(r, ms));
-    },
-
-    /**
-     * 요소 클릭 (안전하게, 마우스 이벤트 포함)
-     */
-    safeClick: function (element) {
-        if (!element) return false;
-        try {
-            console.log(`[NanoBanana] Clicking element:`, element.tagName, element.className);
-            element.scrollIntoView({ behavior: 'instant', block: 'center' });
-
-            // 일반 클릭 시도
-            element.click();
-
-            // 보조 이벤트 발생
-            const events = ['mousedown', 'mouseup', 'pointerdown', 'pointerup'];
-            events.forEach(evt => {
-                element.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
-            });
-
-            return true;
-        } catch (e) {
-            console.error('[NanoBanana] Click failed:', e);
-            return false;
-        }
-    },
-
-    /**
-     * 면책 조항 또는 동의 팝업 처리
-     */
-    handleDisclaimer: async function () {
-        const disclaimerButtons = Array.from(document.querySelectorAll('button')).filter(btn => {
-            const txt = btn.innerText.toLowerCase();
-            return (txt.includes('동의') || txt.includes('수락') || txt.includes('agree') || txt.includes('accept')) &&
-                this.isInteractable(btn);
-        });
-
-        if (disclaimerButtons.length > 0) {
-            console.log('[NanoBanana] Disclaimer/Consent detected, clicking...');
-            this.safeClick(disclaimerButtons[0]);
-            await this.delay(1000);
-            return true;
-        }
-        return false;
+    // GeminiCommon 참조 (편의용)
+    get common() {
+        return window.GeminiCommon;
     },
 
     // ========== 모드 및 환경 설정 ==========
@@ -139,9 +22,10 @@ const NanoBanana = {
     selectProMode: async function () {
         try {
             console.log('[NanoBanana] Attempting to select Pro mode...');
+            const common = this.common;
 
             // 전역 팝업 처리
-            await this.handleDisclaimer();
+            await common.handleDisclaimer();
 
             // 1. 현재 모드 확인 (이미 Pro인지 체크)
             const currentModeText = document.querySelector('.input-area-switch text, .input-area-switch .mat-mdc-button-touch-target')?.parentElement?.innerText || '';
@@ -151,19 +35,19 @@ const NanoBanana = {
             }
 
             // 2. 모드 메뉴 열기
-            const modeBtn = await this.waitForElement('button.input-area-switch, button[aria-label*="모드"]');
+            const modeBtn = await common.waitForElement('button.input-area-switch, button[aria-label*="모드"]');
             if (!modeBtn) return { success: false, message: '모드 선택 버튼을 찾을 수 없습니다' };
 
-            this.safeClick(modeBtn);
-            await this.delay(500); // Python 타이밍 참조: 500ms
+            common.safeClick(modeBtn);
+            await common.delay(500); // Python 타이밍 참조: 500ms
 
             // 3. Pro 옵션 선택 (Shadow DOM 및 다중 선택자)
             const menuItems = Array.from(document.querySelectorAll('button[role="menuitemradio"], button.mat-mdc-menu-item, .mat-mdc-menu-content button, button.bard-mode-list-button'));
             const proItem = menuItems.find(item => item.innerText.includes('Pro') || item.innerText.includes('프로'));
 
             if (proItem) {
-                this.safeClick(proItem);
-                await this.delay(500); // Python 타이밍 참조: 500ms
+                common.safeClick(proItem);
+                await common.delay(500); // Python 타이밍 참조: 500ms
                 console.log('[NanoBanana] Pro mode selected.');
                 return { success: true, message: 'Pro 모드 활성화됨' };
             }
@@ -181,16 +65,17 @@ const NanoBanana = {
     enableImageGeneration: async function () {
         try {
             console.log('[NanoBanana] Enabling image generation tool...');
+            const common = this.common;
 
             // 전역 팝업 처리
-            await this.handleDisclaimer();
+            await common.handleDisclaimer();
 
             // 1. 도구 버튼 찾기
-            const toolsBtn = await this.waitForElement('button.toolbox-drawer-button, button[aria-label*="도구"], button[aria-label*="Tools"]');
+            const toolsBtn = await common.waitForElement('button.toolbox-drawer-button, button[aria-label*="도구"], button[aria-label*="Tools"]');
             if (!toolsBtn) return { success: false, message: '도구 버튼을 찾을 수 없습니다' };
 
-            this.safeClick(toolsBtn);
-            await this.delay(1000);
+            common.safeClick(toolsBtn);
+            await common.delay(1000);
 
             // 2. 이미지 생성하기 옵션 (Aria-label 및 텍스트 조합)
             const allItems = Array.from(document.querySelectorAll('button, .mat-mdc-list-item, [role="menuitem"]'));
@@ -201,8 +86,8 @@ const NanoBanana = {
             );
 
             if (targetItem) {
-                this.safeClick(targetItem);
-                await this.delay(800);
+                common.safeClick(targetItem);
+                await common.delay(800);
                 document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
                 return { success: true, message: '이미지 생성 모드 활성화됨' };
             }
@@ -216,14 +101,19 @@ const NanoBanana = {
         }
     },
 
-    // ========== 이미지 업로드 ==========
-
     /**
-     * 파일 업로드 메뉴 열기
+     * 파일 업로드 메뉴 열기 (네이티브 파일 다이얼로그 트리거 방지)
+     * 주의: 실제 파일 주입은 uploadImageFromPath에서 DataTransfer로 수행
      */
     openUploadMenu: async function () {
         try {
-            console.log('[NanoBanana] Opening upload menu...');
+            console.log('[NanoBanana] Opening upload menu (dialog-free mode)...');
+            const common = this.common;
+
+            // 전역 팝업 처리
+            await common.handleDisclaimer();
+
+            // 업로드 버튼 찾기 (메뉴만 열기 위함)
             const uploadSelectors = [
                 'button[aria-label*="업로드"]',
                 'button[aria-label*="upload"]',
@@ -233,35 +123,30 @@ const NanoBanana = {
             let menuBtn = null;
             for (const sel of uploadSelectors) {
                 menuBtn = document.querySelector(sel);
-                if (menuBtn && this.isInteractable(menuBtn)) break;
+                if (menuBtn && common.isInteractable(menuBtn)) break;
             }
 
-            if (!menuBtn) return { success: false, message: '업로드 메뉴 버튼을 찾을 수 없습니다' };
+            if (!menuBtn) {
+                // 업로드 버튼이 없어도 입력창에 직접 드롭이 가능할 수 있으므로 성공으로 처리
+                console.log('[NanoBanana] No upload button found, will attempt direct drop.');
+                return { success: true, message: '업로드 버튼 없음 (직접 드롭 시도)' };
+            }
 
-            // 0. 면책 조항(버튼: 동의, Agree 등)이 떠있으면 클릭
-            await this.handleDisclaimer();
-
-            this.safeClick(menuBtn);
-            await this.delay(1000);
+            common.safeClick(menuBtn);
+            await common.delay(500);
 
             // 클릭 후에도 면책 조항이 뜨면 한 번 더 체크
-            await this.handleDisclaimer();
+            await common.handleDisclaimer();
 
-            // 파일 업로드 서브메뉴
-            const subItems = Array.from(document.querySelectorAll('button, [role="menuitem"]'));
-            const fileBtn = subItems.find(item =>
-                item.innerText.includes('파일 업로드') ||
-                item.innerText.includes('Upload file') ||
-                item.getAttribute('aria-label')?.includes('파일 업로드')
-            );
+            // [중요] 파일 업로드 서브메뉴 클릭 생략 - 네이티브 다이얼로그 방지
+            // 실제 파일 주입은 uploadImageFromPath()에서 DataTransfer로 수행함
+            console.log('[NanoBanana] Upload menu opened. Skipping file dialog trigger.');
 
-            if (fileBtn) {
-                this.safeClick(fileBtn);
-                await this.delay(500);
-                return { success: true, message: '파일 업로드 다이얼로그 연동됨' };
-            }
+            // ESC로 메뉴 닫기 (드롭존만 활성화하고 다이얼로그 방지)
+            await common.delay(300);
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
 
-            return { success: true, message: '업로드 메뉴 오픈됨' };
+            return { success: true, message: '업로드 메뉴 오픈됨 (다이얼로그 없음)' };
         } catch (e) {
             return { success: false, message: e.message };
         }
@@ -283,6 +168,7 @@ const NanoBanana = {
      */
     waitForImageUpload: async function (timeout = 60000) {
         const startTime = Date.now();
+        const common = this.common;
         console.log('[NanoBanana] Waiting for image upload confirmation...');
 
         while (Date.now() - startTime < timeout) {
@@ -313,7 +199,7 @@ const NanoBanana = {
                 }
             }
 
-            await this.delay(300);
+            await common.delay(300);
         }
         console.warn('[NanoBanana] Upload confirmation timeout');
         return false;
@@ -327,7 +213,8 @@ const NanoBanana = {
     writePrompt: async function (text) {
         try {
             console.log(`[NanoBanana] Writing prompt: "${text.substring(0, 30)}..."`);
-            const input = await this.waitForElement('.ql-editor, [contenteditable="true"]');
+            const common = this.common;
+            const input = await common.waitForElement('.ql-editor, [contenteditable="true"]');
 
             if (!input) return { success: false, message: '입력창을 찾을 수 없습니다' };
 
@@ -336,7 +223,7 @@ const NanoBanana = {
             // 1. execCommand 로 물리적 타이핑 시뮬레이션
             document.execCommand('selectAll', false, null);
             document.execCommand('delete', false, null);
-            await this.delay(100);
+            await common.delay(100);
             document.execCommand('insertText', false, text);
 
             // 2. React/Angular 상태 업데이트 유도 (이벤트 강제 발생)
@@ -345,7 +232,7 @@ const NanoBanana = {
                 input.dispatchEvent(new Event(name, { bubbles: true }));
             });
 
-            await this.delay(300);
+            await common.delay(300);
             return { success: true, message: '프롬프트 주입 완료' };
         } catch (e) {
             return { success: false, message: e.message };
@@ -358,20 +245,21 @@ const NanoBanana = {
     sendMessage: async function (timeout = 30000) {
         try {
             console.log('[NanoBanana] Sending message...');
+            const common = this.common;
             const startTime = Date.now();
 
             while (Date.now() - startTime < timeout) {
                 // 전송 버튼 선택자 (Aria-label 기반이 가장 정확)
                 const sendBtn = document.querySelector('button.send-button, button[aria-label*="보내기"], button[aria-label*="Send"]');
 
-                if (sendBtn && this.isInteractable(sendBtn)) {
+                if (sendBtn && common.isInteractable(sendBtn)) {
                     // 비활성화 여부 재확인 (React 상태 대기)
                     if (sendBtn.getAttribute('aria-disabled') !== 'true') {
-                        this.safeClick(sendBtn);
+                        common.safeClick(sendBtn);
                         return { success: true, message: '메시지 전송 성공' };
                     }
                 }
-                await this.delay(400);
+                await common.delay(400);
             }
 
             // Fallback: Enter 키
@@ -390,10 +278,11 @@ const NanoBanana = {
     // ========== 응답 대기 및 이미지 다운로드 ==========
 
     /**
-     * 응답 생성 완료 대기 (GeminiScripts.cs 규격과 동기화)
+     * 응답 생성 완료 대기 (이미지 생성 전용)
      */
     waitForResponse: async function (timeout = 180000) {
         console.log('[NanoBanana] Waiting for AI response...');
+        const common = this.common;
         const startTime = Date.now();
         let lastResponseText = '';
         let stableCount = 0;
@@ -415,7 +304,7 @@ const NanoBanana = {
 
             if (isBusy) {
                 stableCount = 0;
-                await this.delay(1500);
+                await common.delay(1500);
                 continue;
             }
 
@@ -435,7 +324,7 @@ const NanoBanana = {
                 lastResponseText = currentResponse;
             }
 
-            await this.delay(1500);
+            await common.delay(1500);
         }
 
         return { success: false, message: '응답 대기 시간 초과' };
@@ -447,6 +336,7 @@ const NanoBanana = {
     downloadOriginalImage: async function () {
         try {
             console.log('[NanoBanana] Searching for generated image to download...');
+            const common = this.common;
 
             // 1. 이미지 찾기 (Shadow DOM 포함)
             const imgSelectors = [
@@ -462,7 +352,7 @@ const NanoBanana = {
                 const imgs = document.querySelectorAll(sel);
                 if (imgs.length > 0) {
                     targetImg = imgs[imgs.length - 1]; // 가장 최신 이미지
-                    if (this.isInteractable(targetImg)) break;
+                    if (common.isInteractable(targetImg)) break;
                 }
             }
 
@@ -481,13 +371,13 @@ const NanoBanana = {
                 clientY: rect.top + rect.height / 2
             });
             targetImg.dispatchEvent(hoverEvt);
-            await this.delay(1000);
+            await common.delay(1000);
 
             // 3. 다운로드 버튼 선택 (다중 선택자)
-            const downloadBtn = await this.waitForElement('button[aria-label*="다운로드"], button[aria-label*="Download"], button.generated-image-button, .on-hover-button button');
+            const downloadBtn = await common.waitForElement('button[aria-label*="다운로드"], button[aria-label*="Download"], button.generated-image-button, .on-hover-button button');
             if (downloadBtn) {
                 console.log('[NanoBanana] Download button found, clicking...');
-                this.safeClick(downloadBtn);
+                common.safeClick(downloadBtn);
                 return { success: true, message: '다운로드 시작됨' };
             }
 
@@ -496,7 +386,7 @@ const NanoBanana = {
             if (parentContainer) {
                 const fallbackBtn = parentContainer.querySelector('button[aria-label*="다운로드"]');
                 if (fallbackBtn) {
-                    this.safeClick(fallbackBtn);
+                    common.safeClick(fallbackBtn);
                     return { success: true, message: '다운로드 시작됨 (폴백)' };
                 }
             }
@@ -515,11 +405,12 @@ const NanoBanana = {
     deleteCurrentChat: async function () {
         try {
             console.log('[NanoBanana] Deleting current chat...');
-            const menuBtn = await this.waitForElement('button[aria-label*="대화 작업"], button[aria-label*="actions"]');
+            const common = this.common;
+            const menuBtn = await common.waitForElement('button[aria-label*="대화 작업"], button[aria-label*="actions"]');
             if (!menuBtn) return { success: false, message: '메뉴 버튼 없음' };
 
-            this.safeClick(menuBtn);
-            await this.delay(600);
+            common.safeClick(menuBtn);
+            await common.delay(600);
 
             const deleteItem = Array.from(document.querySelectorAll('[role="menuitem"], button.mat-mdc-menu-item'))
                 .find(el => el.innerText.includes('삭제') || el.innerText.includes('Delete'));
@@ -529,20 +420,75 @@ const NanoBanana = {
                 return { success: false, message: '삭제 항목 없음' };
             }
 
-            this.safeClick(deleteItem);
-            await this.delay(800);
+            common.safeClick(deleteItem);
+            await common.delay(800);
 
             const confirmBtn = Array.from(document.querySelectorAll('mat-dialog-actions button, .mat-mdc-dialog-actions button'))
                 .find(el => el.innerText.includes('삭제') || el.innerText.includes('Delete'));
 
             if (confirmBtn) {
-                this.safeClick(confirmBtn);
-                await this.delay(1000);
+                common.safeClick(confirmBtn);
+                await common.delay(1000);
                 return { success: true, message: '삭제 완료' };
             }
 
             return { success: false, message: '확인 버튼 없음' };
         } catch (e) {
+            return { success: false, message: e.message };
+        }
+    },
+
+    /**
+     * Gemini 응답 생성 중지
+     * 현재 진행 중인 AI 응답 생성을 중지합니다.
+     */
+    stopGeminiResponse: function () {
+        try {
+            console.log('[NanoBanana] Attempting to stop Gemini response...');
+            const common = this.common;
+
+            // 1. Send 버튼이 Stop 상태인 경우 (가장 일반적)
+            const sendBtn = document.querySelector('.send-button.stop');
+            if (sendBtn && sendBtn.offsetParent !== null && !sendBtn.disabled) {
+                common.safeClick(sendBtn);
+                console.log('[NanoBanana] Stopped via send button');
+                return { success: true, message: 'send 버튼으로 중지됨' };
+            }
+
+            // 2. 별도의 중지 버튼 검색
+            const stopSelectors = [
+                'button[aria-label*="중지"]',
+                'button[aria-label*="Stop"]',
+                'button[aria-label="대답 생성 중지"]',
+                'button[aria-label="Stop generating"]'
+            ];
+
+            for (const sel of stopSelectors) {
+                const btn = document.querySelector(sel);
+                if (btn && btn.offsetParent !== null && !btn.disabled) {
+                    common.safeClick(btn);
+                    console.log(`[NanoBanana] Stopped via ${sel}`);
+                    return { success: true, message: `${sel}로 중지됨` };
+                }
+            }
+
+            // 3. mat-icon으로 stop 검색
+            const icons = document.querySelectorAll('mat-icon');
+            for (const icon of icons) {
+                if (icon.textContent === 'stop' || icon.textContent === 'stop_circle') {
+                    const parentBtn = icon.closest('button');
+                    if (parentBtn && parentBtn.offsetParent !== null && !parentBtn.disabled) {
+                        common.safeClick(parentBtn);
+                        console.log('[NanoBanana] Stopped via mat-icon');
+                        return { success: true, message: 'mat-icon으로 중지됨' };
+                    }
+                }
+            }
+
+            console.log('[NanoBanana] No stop button found');
+            return { success: false, message: '중지 버튼을 찾을 수 없음' };
+        } catch (e) {
+            console.error('[NanoBanana] Stop error:', e);
             return { success: false, message: e.message };
         }
     },
@@ -562,9 +508,7 @@ const NanoBanana = {
         }
     },
 
-    // ========== CDP 강화 기능 (자동 이미지 업로드) ==========
-
-    // ========== 파일 전송 고도화 (Base64 직접 주입) ==========
+    // ========== 파일 전송 (Base64 직접 주입) ==========
 
     /**
      * Base64 이미지를 File 객체로 변환하여 input에 주입 (개선된 버전)
@@ -572,6 +516,7 @@ const NanoBanana = {
     uploadImageFromPath: async function (base64Data, filename) {
         try {
             console.log(`[NanoBanana] Injecting image file: ${filename}`);
+            const common = this.common;
 
             // 1. Base64 → File 변환
             let mimeType = 'image/png';
@@ -587,31 +532,25 @@ const NanoBanana = {
             const file = new File([buf], filename, { type: mimeType });
             console.log(`[NanoBanana] File created: ${file.name}, size: ${file.size} bytes`);
 
-            // 2. 업로드 메뉴를 열어 input[type=file] 생성 유도
+            // 2. 드롭존 활성화를 위해 업로드 메뉴 열기 (다이얼로그 없이)
+            // 기존 input이 없으면 드래그 앤 드롭으로 처리
             let input = document.querySelector('input[type="file"]');
             if (!input) {
-                console.log('[NanoBanana] File input not found, opening upload menu...');
+                console.log('[NanoBanana] File input not found, preparing dropzone...');
 
-                // 업로드 버튼 클릭
+                // 업로드 버튼 클릭 후 바로 ESC (다이얼로그 방지)
                 const uploadBtn = document.querySelector('button[aria-label*="업로드"], button[aria-label*="upload"], button.upload-card-button');
                 if (uploadBtn) {
-                    this.safeClick(uploadBtn);
-                    await this.delay(800);
+                    common.safeClick(uploadBtn);
+                    await common.delay(500);
 
-                    // 파일 업로드 서브메뉴 클릭
-                    const subItems = Array.from(document.querySelectorAll('button, [role="menuitem"]'));
-                    const fileBtn = subItems.find(item =>
-                        item.innerText.includes('파일 업로드') ||
-                        item.innerText.includes('Upload file') ||
-                        item.getAttribute('aria-label')?.includes('파일 업로드')
-                    );
-                    if (fileBtn) {
-                        this.safeClick(fileBtn);
-                        await this.delay(800);
-                    }
+                    // [중요] 파일 업로드 서브메뉴 클릭 생략 - 네이티브 다이얼로그 방지
+                    // ESC로 메뉴 닫기
+                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                    await common.delay(300);
                 }
 
-                // 다시 input 확인 (숨겨진 요소 포함 모든 input 검색 후 마지막 요소 선택)
+                // 숨겨진 input 확인 (이미 존재할 수 있음)
                 const allInputs = document.querySelectorAll('input[type="file"]');
                 if (allInputs.length > 0) {
                     input = allInputs[allInputs.length - 1];
@@ -644,7 +583,7 @@ const NanoBanana = {
                 });
                 input.dispatchEvent(dropEvent);
 
-                await this.delay(1500);
+                await common.delay(1500);
                 return { success: true, message: 'DataTransfer로 파일 주입 완료' };
             }
 
@@ -673,7 +612,7 @@ const NanoBanana = {
             const uniqueTargets = [...new Set(dropTargets)];
 
             for (const dropzone of uniqueTargets) {
-                if (!this.isInteractable(dropzone)) continue;
+                if (!common.isInteractable(dropzone)) continue;
 
                 console.log(`[NanoBanana] Attempting drop on: ${dropzone.tagName}.${dropzone.className}`);
 
@@ -683,25 +622,25 @@ const NanoBanana = {
 
                     // 포커스 시도
                     dropzone.focus();
-                    await this.delay(100);
+                    await common.delay(100);
 
                     // 드래그 시작 이벤트
                     const dragStartEvent = new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt });
                     dropzone.dispatchEvent(dragStartEvent);
 
-                    await this.delay(50);
+                    await common.delay(50);
 
                     // 드래그 엔터
                     const dragEnterEvent = new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: dt });
                     dropzone.dispatchEvent(dragEnterEvent);
 
-                    await this.delay(50);
+                    await common.delay(50);
 
                     // 드래그 오버 (필수)
                     const dragOverEvent = new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt });
                     dropzone.dispatchEvent(dragOverEvent);
 
-                    await this.delay(50);
+                    await common.delay(50);
 
                     // 드롭 (핵심)
                     const dropEvent = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt });
@@ -718,7 +657,7 @@ const NanoBanana = {
                     const changeEvent = new Event('change', { bubbles: true });
                     dropzone.dispatchEvent(changeEvent);
 
-                    await this.delay(2000); // 처리 대기
+                    await common.delay(2000); // 처리 대기
 
                     // 성공 여부 확인
                     if (await this.waitForImageUpload(3000)) {
@@ -737,28 +676,214 @@ const NanoBanana = {
     },
 
     /**
-     * 마지막 생성 이미지의 Base64 추출 (CORS 회피 시도)
+     * 마지막 생성 이미지의 Base64 추출 (강화된 버전 - 다중 선택자 + Canvas 폴백)
      */
     getGeneratedImageBase64: async function () {
         try {
-            const img = document.querySelector('.model-response img[src*="googleusercontent"], .generated-image img');
-            if (!img || !img.src) return { success: false, message: '이미지 없음' };
+            const common = this.common;
 
-            const src = img.src;
-            console.log(`[NanoBanana] Extracting image: ${src.substring(0, 50)}...`);
+            // 최소 이미지 크기 (placeholder 및 아이콘 필터링)
+            const MIN_WIDTH = 100;
+            const MIN_HEIGHT = 100;
 
-            if (src.startsWith('blob:')) {
-                const res = await fetch(src);
-                const blob = await res.blob();
-                return new Promise(resolve => {
-                    const reader = new FileReader();
-                    reader.onloadend = () => resolve({ success: true, base64: reader.result });
-                    reader.readAsDataURL(blob);
-                });
+            // 다중 이미지 선택자 (우선순위 순)
+            const imgSelectors = [
+                // 1. googleusercontent (가장 일반적인 생성 이미지 URL)
+                'img[src*="googleusercontent"]',
+                '.model-response img[src*="googleusercontent"]',
+                'message-content img[src*="googleusercontent"]',
+
+                // 2. 응답 컨테이너 내 이미지
+                '.model-response img',
+                '.response-container img',
+                'message-content img',
+
+                // 3. 이미지 버튼 내 이미지 (제외 항목 아래에 처리)
+                'button.image-button img',
+                '.generated-image img',
+
+                // 4. blob URL 이미지
+                "img[src^='blob:']",
+
+                // 5. data URL 이미지
+                "img[src^='data:']"
+            ];
+
+            let targetImg = null;
+            let imgSrc = null;
+
+            for (const sel of imgSelectors) {
+                const imgs = document.querySelectorAll(sel);
+                // 역순으로 가장 최신 이미지부터 검색
+                for (let i = imgs.length - 1; i >= 0; i--) {
+                    const img = imgs[i];
+                    if (!img || !img.src) continue;
+
+                    // 크기 검증 (placeholder 필터링)
+                    const width = img.naturalWidth || img.width;
+                    const height = img.naturalHeight || img.height;
+
+                    if (width < MIN_WIDTH || height < MIN_HEIGHT) {
+                        console.log(`[NanoBanana] Skipping small image: ${width}x${height}`);
+                        continue;
+                    }
+
+                    // 아이콘/placeholder URL 패턴 제외
+                    const src = img.src.toLowerCase();
+                    if (src.includes('icon') ||
+                        src.includes('avatar') ||
+                        src.includes('logo') ||
+                        src.includes('placeholder') ||
+                        src.includes('/s16/') ||
+                        src.includes('/s24/') ||
+                        src.includes('/s32/') ||
+                        src.includes('/s48/') ||
+                        src.includes('/s64/')) {
+                        console.log(`[NanoBanana] Skipping icon/avatar image: ${src.substring(0, 60)}...`);
+                        continue;
+                    }
+
+                    targetImg = img;
+                    imgSrc = img.src;
+                    console.log(`[NanoBanana] Valid image found via selector: ${sel} (${width}x${height})`);
+                    break;
+                }
+                if (targetImg) break;
             }
 
-            return { success: true, base64: src, message: 'URL 반환' };
+            if (!targetImg || !imgSrc) {
+                return { success: false, message: '유효한 이미지를 찾을 수 없음 (크기 조건 미충족 또는 0개 이미지)' };
+            }
+
+            console.log(`[NanoBanana] Extracting image: ${imgSrc.substring(0, 60)}...`);
+
+            // data: URI인 경우 바로 반환
+            if (imgSrc.startsWith('data:')) {
+                console.log('[NanoBanana] Image is data URL, returning directly');
+                return { success: true, base64: imgSrc };
+            }
+
+            // 방법 1: 이미 로드된 이미지에서 Canvas 추출 (가장 안정적)
+            try {
+                console.log('[NanoBanana] Attempting canvas extraction from loaded image...');
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+
+                // 이미지 로드 완료 대기
+                if (!targetImg.complete) {
+                    await new Promise(resolve => {
+                        targetImg.onload = resolve;
+                        targetImg.onerror = resolve;
+                        setTimeout(resolve, 3000);
+                    });
+                }
+
+                canvas.width = targetImg.naturalWidth || targetImg.width;
+                canvas.height = targetImg.naturalHeight || targetImg.height;
+
+                if (canvas.width > 0 && canvas.height > 0) {
+                    ctx.drawImage(targetImg, 0, 0);
+                    const dataUrl = canvas.toDataURL('image/png');
+
+                    // 유효한 이미지인지 확인 (빈 캔버스가 아닌지)
+                    if (dataUrl.length > 100) {
+                        console.log('[NanoBanana] Canvas extraction successful');
+                        return { success: true, base64: dataUrl };
+                    }
+                }
+            } catch (canvasErr) {
+                console.log(`[NanoBanana] Canvas error (CORS): ${canvasErr.message}`);
+            }
+
+            // 방법 2: crossOrigin 속성으로 원본 크기 이미지 로드 후 Canvas 추출
+            try {
+                console.log('[NanoBanana] Attempting crossOrigin image load with original size...');
+
+                // 원본 크기 URL로 변환 (=s0)
+                let originalSizeUrl = imgSrc;
+                if (imgSrc.includes('googleusercontent.com')) {
+                    originalSizeUrl = imgSrc.replace(/=s\d+.*$|=w\d+.*$/, '=s0');
+                    if (!originalSizeUrl.includes('=s0')) originalSizeUrl += '=s0';
+                }
+                console.log(`[NanoBanana] Original size URL: ${originalSizeUrl.substring(0, 80)}...`);
+
+                const newImg = new Image();
+                newImg.crossOrigin = 'anonymous';
+
+                const imgLoaded = await new Promise((resolve) => {
+                    newImg.onload = () => resolve(true);
+                    newImg.onerror = () => resolve(false);
+                    setTimeout(() => resolve(false), 8000); // 타임아웃 증가
+                    newImg.src = originalSizeUrl;
+                });
+
+                if (imgLoaded && newImg.naturalWidth > 0) {
+                    console.log(`[NanoBanana] Image loaded: ${newImg.naturalWidth}x${newImg.naturalHeight}`);
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    canvas.width = newImg.naturalWidth;
+                    canvas.height = newImg.naturalHeight;
+                    ctx.drawImage(newImg, 0, 0);
+                    const dataUrl = canvas.toDataURL('image/png');
+
+                    if (dataUrl.length > 100) {
+                        console.log('[NanoBanana] CrossOrigin canvas extraction successful');
+                        return { success: true, base64: dataUrl };
+                    }
+                }
+            } catch (crossErr) {
+                console.log(`[NanoBanana] CrossOrigin error: ${crossErr.message}`);
+            }
+
+            // 방법 3: fetch로 원본 크기 이미지 다운로드 시도 (쿠키 포함)
+            try {
+                console.log('[NanoBanana] Attempting fetch with credentials for original size...');
+
+                // 원본 크기 URL로 변환 (=s0)
+                let fetchUrl = imgSrc;
+                if (imgSrc.includes('googleusercontent.com')) {
+                    fetchUrl = imgSrc.replace(/=s\d+.*$|=w\d+.*$/, '=s0');
+                    if (!fetchUrl.includes('=s0')) fetchUrl += '=s0';
+                }
+
+                const res = await fetch(fetchUrl, {
+                    credentials: 'include',
+                    mode: 'cors'
+                });
+                if (res.ok) {
+                    const blob = await res.blob();
+                    console.log(`[NanoBanana] Fetch successful, blob size: ${blob.size} bytes`);
+                    return new Promise(resolve => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => {
+                            console.log('[NanoBanana] Fetch base64 extraction complete');
+                            resolve({ success: true, base64: reader.result });
+                        };
+                        reader.onerror = () => {
+                            console.error('[NanoBanana] FileReader error');
+                            resolve({ success: false, message: 'FileReader 오류' });
+                        };
+                        reader.readAsDataURL(blob);
+                    });
+                } else {
+                    console.log(`[NanoBanana] Fetch failed: ${res.status}`);
+                }
+            } catch (fetchErr) {
+                console.log(`[NanoBanana] Fetch error: ${fetchErr.message}`);
+            }
+
+            // 방법 4: 쿠키를 함께 전달하여 C#에서 다운로드 시도
+            console.log('[NanoBanana] Fallback: returning URL for C# download');
+            // URL을 원본 크기(=s0)로 변환
+            let originalUrl = imgSrc;
+            if (imgSrc.includes('googleusercontent.com')) {
+                originalUrl = imgSrc.replace(/=s\d+.*$|=w\d+.*$/, '=s0');
+                if (!originalUrl.includes('=s0')) originalUrl += '=s0';
+            }
+            return { success: true, base64: originalUrl, isUrl: true };
+
         } catch (e) {
+            console.error('[NanoBanana] getGeneratedImageBase64 error:', e);
             return { success: false, message: e.message };
         }
     },
@@ -768,11 +893,12 @@ const NanoBanana = {
      */
     waitForDownloadReady: async function (timeout = 30000) {
         const startTime = Date.now();
+        const common = this.common;
         console.log('[NanoBanana] Waiting for download button readiness...');
 
         while (Date.now() - startTime < timeout) {
             const btn = document.querySelector('button[aria-label*="다운로드"], button[aria-label*="Download"], button.generated-image-button');
-            if (btn && this.isInteractable(btn)) return { success: true, message: '다운로드 준비됨' };
+            if (btn && common.isInteractable(btn)) return { success: true, message: '다운로드 준비됨' };
 
             // 호버 유도
             const imgs = document.querySelectorAll('button.image-button img, .model-response img');
@@ -781,7 +907,7 @@ const NanoBanana = {
                 lastImg.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
             }
 
-            await this.delay(800);
+            await common.delay(800);
         }
 
         return { success: false, message: '다운로드 대기 타임아웃' };
@@ -798,6 +924,7 @@ const NanoBanana = {
      */
     autoRunWorkflow: async function (prompt, imageBase64, filename, useProMode = true) {
         const steps = [];
+        const common = this.common;
         let resultBase64 = null;
 
         console.log('[NanoBanana] ===== autoRunWorkflow 시작 =====');
@@ -808,7 +935,7 @@ const NanoBanana = {
             console.log('[NanoBanana] [0/8] 페이지 준비 상태 확인...');
 
             // 전역 팝업(면책 조항 등) 먼저 처리
-            await this.handleDisclaimer();
+            await common.handleDisclaimer();
 
             const inputExists = document.querySelector('.ql-editor, [contenteditable="true"]');
             if (!inputExists) {
@@ -822,7 +949,7 @@ const NanoBanana = {
                 const proResult = await this.selectProMode();
                 steps.push({ step: 'Pro 모드', ...proResult });
                 console.log(`[NanoBanana] Pro 모드 결과: ${proResult.success ? '성공' : '실패'}`);
-                await this.delay(500);
+                await common.delay(500);
             }
 
             // 2. 이미지 생성 도구 활성화
@@ -830,7 +957,7 @@ const NanoBanana = {
             const imgGenResult = await this.enableImageGeneration();
             steps.push({ step: '이미지 생성 모드', ...imgGenResult });
             console.log(`[NanoBanana] 이미지 생성 모드 결과: ${imgGenResult.success ? '성공' : '실패'}`);
-            await this.delay(500);
+            await common.delay(500);
 
             // 3. 업로드 메뉴 열기 (선택 사항 - 메뉴 열기 실패해도 input이 있으면 진행 가능)
             console.log('[NanoBanana] [3/8] 업로드 메뉴 열기...');
@@ -841,7 +968,7 @@ const NanoBanana = {
             if (!menuResult.success) {
                 console.warn('[NanoBanana] 업로드 메뉴 열기 실패했으나 업로드 시도 계속...');
             }
-            await this.delay(500);
+            await common.delay(500);
 
             // 4. 이미지 자동 업로드
             console.log('[NanoBanana] [4/8] 이미지 업로드...');
@@ -870,7 +997,7 @@ const NanoBanana = {
                 console.error('[NanoBanana] 프롬프트 입력 실패');
                 return { success: false, resultBase64: null, steps, message: '프롬프트 입력 실패' };
             }
-            await this.delay(500);
+            await common.delay(500);
 
             // 6. 메시지 전송
             console.log('[NanoBanana] [6/8] 메시지 전송...');
@@ -894,7 +1021,7 @@ const NanoBanana = {
             // 8. 이미지 추출 (이미지가 있는 경우)
             if (responseResult.hasImage) {
                 console.log('[NanoBanana] [8/8] 이미지 추출...');
-                await this.delay(2000); // 이미지 렌더링 대기
+                await common.delay(2000); // 이미지 렌더링 대기
 
                 const extractResult = await this.getGeneratedImageBase64();
                 steps.push({ step: '이미지 추출', ...extractResult });
@@ -932,6 +1059,7 @@ const NanoBanana = {
      */
     runWorkflow: async function (prompt, useProMode = true, useImageGen = true) {
         const steps = [];
+        const common = this.common;
 
         try {
             // 1. Pro 모드 선택

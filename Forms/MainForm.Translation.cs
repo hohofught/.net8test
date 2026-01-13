@@ -6,6 +6,7 @@ using System.Drawing;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using GeminiWebTranslator.Services;
 
 namespace GeminiWebTranslator.Forms;
 
@@ -82,30 +83,71 @@ public partial class MainForm
         Func<string, Task<string>> generator = async (prompt) =>
         {
             // WebView 모드 시도
-            if (useWebView2Mode && automation != null) 
+            if (useWebView2Mode)
             {
+                if (automation == null)
+                {
+                    throw new Exception("WebView2가 아직 초기화되지 않았습니다. 잠시 후 다시 시도해주세요.");
+                }
                 return await automation.GenerateContentAsync(prompt);
             }
             
-            // 브라우저 모드 시도 (연결 상태 확인)
-            if (useBrowserMode && browserAutomation != null)
+            // 브라우저 모드 시도 (연결 상태 확인 및 자동 재연결)
+            if (useBrowserMode)
             {
+                // 연결이 끊어진 경우 재연결 시도
+                if (browserAutomation == null || !browserAutomation.IsConnected)
+                {
+                    AppendLog("[브라우저] 연결이 끊어졌습니다. 재연결 시도 중...");
+                    
+                    try
+                    {
+                        // GlobalBrowserState를 통해 브라우저 재획득 시도
+                        var browserState = GlobalBrowserState.Instance;
+                        
+                        // 브라우저가 여전히 활성화되어 있다면 재연결
+                        if (browserState.ActiveBrowser != null && !browserState.ActiveBrowser.IsClosed)
+                        {
+                            browserAutomation = new PuppeteerGeminiAutomation(browserState.ActiveBrowser);
+                            browserAutomation.OnLog += msg => AppendLog(msg);
+                            AppendLog("[브라우저] 기존 브라우저에 재연결 성공");
+                        }
+                        else
+                        {
+                            // 브라우저가 완전히 종료된 경우 새로 시작
+                            AppendLog("[브라우저] 브라우저가 종료됨 - 새로 시작 시도...");
+                            
+                            if (await browserState.AcquireBrowserAsync(BrowserOwner.MainFormBrowserMode, headless: false, forceRelease: true))
+                            {
+                                browserAutomation = new PuppeteerGeminiAutomation(browserState.ActiveBrowser!);
+                                browserAutomation.OnLog += msg => AppendLog(msg);
+                                AppendLog("[브라우저] 새 브라우저 시작 및 연결 성공");
+                            }
+                            else
+                            {
+                                throw new Exception("브라우저를 시작할 수 없습니다.");
+                            }
+                        }
+                    }
+                    catch (Exception reconnectEx)
+                    {
+                        AppendLog($"[ERROR] 브라우저 재연결 실패: {reconnectEx.Message}");
+                        browserAutomation = null;
+                        useBrowserMode = false;
+                        throw new Exception($"브라우저 연결이 끊어졌습니다.\n\n재연결에 실패했습니다: {reconnectEx.Message}\n\n'브라우저 모드' 버튼을 다시 눌러 연결하세요.");
+                    }
+                }
+                
                 try
                 {
-                    if (!browserAutomation.IsConnected)
-                    {
-                        throw new PuppeteerSharp.TargetClosedException("브라우저 연결이 끊어졌습니다.");
-                    }
-                    return await browserAutomation.GenerateContentAsync(prompt);
+                    return await browserAutomation!.GenerateContentAsync(prompt);
                 }
                 catch (PuppeteerSharp.TargetClosedException ex)
                 {
                     AppendLog($"[ERROR] 브라우저 연결 끊김: {ex.Message}");
                     browserAutomation = null;
                     useBrowserMode = false;
-                    
-                    // 사용자가 명시적으로 모드를 전환하기 전까지는 자동 폴백하지 않음
-                    throw new Exception("브라우저 연결이 끊어졌습니다. 모드를 다시 설정해주세요.");
+                    throw new Exception("브라우저 연결이 끊어졌습니다.\n\n'브라우저 모드' 버튼을 다시 눌러 연결하세요.");
                 }
             }
             
@@ -116,7 +158,8 @@ public partial class MainForm
                 return await httpClient.GenerateContentAsync(prompt);
             }
             
-            throw new Exception("API 초기화 필요 (로그인 확인)");
+            // 아무 모드도 선택되지 않은 경우 - 친절한 안내
+            throw new Exception("번역 모드가 선택되지 않았습니다.\n\n다음 중 하나를 활성화해주세요:\n• HTTP 체크박스 켜기 + HTTP 설정 버튼\n• WebView 모드 버튼\n• 브라우저 모드 버튼");
         };
 
         // 2. 세션 리셋 로직 정의 (WebView/Browser 모드에서 지속적인 대화 안정성을 위함)

@@ -226,14 +226,6 @@ public partial class MainForm
         var btnGlossary = new Button { Text = "단어장", Location = new Point(470, 3), Width = 70, Height = 28, BackColor = Color.FromArgb(80, 80, 100), ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand };
         var lblGlossary = new Label { Text = "", Location = new Point(545, 8), AutoSize = true, ForeColor = accentGreen, Font = new Font("Segoe UI", 9) };
         
-        // Hide Browser Checkbox - Adjusted position
-        chkHideBrowser = new CheckBox { 
-            Text = "브라우저 숨기기", 
-            Location = new Point(610, 5), 
-            AutoSize = true, 
-            ForeColor = darkText,
-            Checked = false // 기본값: 보임
-        };
 
         // Custom Prompt Checkbox (for non-file mode) - Adjusted position
         chkUseCustomPrompt = new CheckBox {
@@ -268,7 +260,7 @@ public partial class MainForm
             }
         };
         // OCR Toggle Checkbox
-        bottomPanel.Controls.AddRange(new Control[] { lblLang, cmbTargetLang, lblStyle, cmbStyle, lblGame, cmbGame, btnGlossary, lblGlossary, chkHideBrowser, chkUseCustomPrompt, chkAlwaysOnTop });
+        bottomPanel.Controls.AddRange(new Control[] { lblLang, cmbTargetLang, lblStyle, cmbStyle, lblGame, cmbGame, btnGlossary, lblGlossary, chkUseCustomPrompt, chkAlwaysOnTop });
 
         controlPanel.Controls.AddRange(new Control[] { topPanel, bottomPanel });
         parent.Controls.Add(controlPanel);
@@ -402,11 +394,26 @@ public partial class MainForm
 
 
 
-    private void BtnStop_Click(object? sender, EventArgs e)
+    private async void BtnStop_Click(object? sender, EventArgs e)
     {
         if (isTranslating && !isPaused)
         {
             translationCancellation?.Cancel();
+            
+            // Gemini 응답 생성도 함께 중지
+            try
+            {
+                if (useBrowserMode && browserAutomation != null)
+                {
+                    _ = browserAutomation.StopGeminiResponseAsync();
+                }
+                else if (useWebView2Mode && automation != null)
+                {
+                    _ = automation.StopGeminiResponseAsync();
+                }
+            }
+            catch { /* 중지 오류 무시 */ }
+            
             isPaused = true;
             btnStop.Text = "▶️ 계속";
             btnStop.BackColor = accentGreen;

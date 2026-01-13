@@ -26,6 +26,12 @@
     <None Update="Resources\Scripts\NanoBananaAutomation.js">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Update="Resources\Scripts\GeminiCommon.js">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Resources\Scripts\BrowserModeAutomation.js">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Update="Resources\Scripts\GeminiCompatibilityCheck.js">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

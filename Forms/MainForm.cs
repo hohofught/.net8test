@@ -31,7 +31,6 @@ public partial class MainForm : Form
     private ComboBox cmbTargetLang = null!;
     private ComboBox cmbStyle = null!;
     private ComboBox cmbGeminiModel = null!;
-    private CheckBox chkHideBrowser = null!;
     private CheckBox chkUseCustomPrompt = null!;
     private CheckBox chkHttpMode = null!; // HTTP 모드 활성화 체크박스
 
@@ -132,18 +131,45 @@ public partial class MainForm : Form
     {
         return async (prompt) =>
         {
-            // 1. 사용자가 선택한 UI 기반 모드 우선 (WebView 또는 브라우저)
-            if (useWebView2Mode && automation != null) return await automation.GenerateContentAsync(prompt);
-            if (useBrowserMode && browserAutomation != null) return await browserAutomation.GenerateContentAsync(prompt);
+            // 1. WebView 모드 우선
+            if (useWebView2Mode)
+            {
+                if (automation == null) throw new Exception("WebView2가 초기화되지 않았습니다.");
+                return await automation.GenerateContentAsync(prompt);
+            }
             
-            // 2. 다른 모드가 활성화되지 않았을 때만 HTTP/API 모드 사용 (체크박스 확인 필수)
+            // 2. 브라우저 모드 (자동 재연결 지원)
+            if (useBrowserMode)
+            {
+                // 연결 끊김 시 재연결 시도
+                if (browserAutomation == null || !browserAutomation.IsConnected)
+                {
+                    AppendLog("[브라우저] 연결이 끊어졌습니다. 재연결 시도 중...");
+                    var browserState = GlobalBrowserState.Instance;
+                    
+                    if (browserState.ActiveBrowser != null && !browserState.ActiveBrowser.IsClosed)
+                    {
+                        browserAutomation = new PuppeteerGeminiAutomation(browserState.ActiveBrowser);
+                        browserAutomation.OnLog += msg => AppendLog(msg);
+                        AppendLog("[브라우저] 재연결 성공");
+                    }
+                    else
+                    {
+                        throw new Exception("브라우저 연결이 끊어졌습니다.\n\n'브라우저 모드' 버튼을 다시 눌러 연결하세요.");
+                    }
+                }
+                
+                return await browserAutomation.GenerateContentAsync(prompt);
+            }
+            
+            // 3. HTTP 모드
             if (chkHttpMode.Checked && httpClient?.IsInitialized == true)
             {
                 httpClient.ResetSession();
                 return await httpClient.GenerateContentAsync(prompt);
             }
             
-            throw new Exception("API 초기화 필요 (WebView, HTTP API 또는 브라우저 모드를 활성화해주세요)");
+            throw new Exception("번역 모드가 선택되지 않았습니다.\n\n다음 중 하나를 활성화해주세요:\n• HTTP 체크박스 + HTTP 설정 버튼\n• WebView 모드 버튼\n• 브라우저 모드 버튼");
         };
     }
 
@@ -770,12 +796,23 @@ public partial class MainForm : Form
 
     /// <summary>
     /// [브라우저 모드] 버튼 클릭 시 호출 - Puppeteer 기반 독립 브라우저를 컨트롤합니다.
+    /// GlobalBrowserState를 통해 NanoBanana와의 충돌을 방지합니다.
     /// </summary>
     private async void BtnModeBrowser_Click(object? sender, EventArgs e)
     {
         btnModeBrowser.Enabled = false;
         try
         {
+            // 다른 모드가 브라우저를 사용 중인지 확인
+            var browserState = GlobalBrowserState.Instance;
+            if (!browserState.CanAcquire(BrowserOwner.MainFormBrowserMode))
+            {
+                var owner = browserState.CurrentOwner;
+                AppendLog($"[BrowserMode] 브라우저가 {owner}에서 사용 중입니다.");
+                MessageBox.Show($"브라우저가 {owner}에서 사용 중입니다.\n먼저 해당 기능을 종료하세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
             useWebView2Mode = false;
             useBrowserMode = true;
             UpdateModeButtonsUI(btnModeBrowser);
@@ -787,10 +824,29 @@ public partial class MainForm : Form
                 AppendLog("[알림] 브라우저 모드 실행 중에는 NanoBanana를 사용할 수 없습니다.");
             }
 
-            // 독립 브라우저 엔진 준비 및 실행
-            await isolatedBrowserManager.PrepareBrowserAsync();
-            var browser = await isolatedBrowserManager.LaunchBrowserAsync(headless: chkHideBrowser.Checked);
+            // 기존 자동화 객체 정리
+            if (browserAutomation != null)
+            {
+                AppendLog("[BrowserMode] 기존 브라우저 자동화 세션 정리 중...");
+                try
+                {
+                    if (browserAutomation is IDisposable disposable)
+                    {
+                        disposable.Dispose();
+                    }
+                }
+                catch { }
+                browserAutomation = null;
+            }
+
+            // GlobalBrowserState를 통해 브라우저 획득
+            AppendLog("[BrowserMode] GlobalBrowserState를 통해 브라우저 획득 시도...");
+            if (!await browserState.AcquireBrowserAsync(BrowserOwner.MainFormBrowserMode, headless: false))
+            {
+                throw new Exception("브라우저 획득에 실패했습니다. 다른 프로세스가 사용 중일 수 있습니다.");
+            }
             
+            var browser = browserState.ActiveBrowser;
             if (browser == null)
             {
                 throw new Exception("브라우저 실행에 실패했습니다.");
@@ -800,22 +856,13 @@ public partial class MainForm : Form
             browserAutomation = new PuppeteerGeminiAutomation(browser);
             browserAutomation.OnLog += msg => AppendLog(msg);
             
-            // 브라우저 종료 시 자동화 객체 정리
-            browser.Closed += (s, args) =>
-            {
-                browserAutomation = null;
-                useBrowserMode = false;
-                BeginInvoke(() =>
-                {
-                    UpdateStatus("브라우저가 종료되었습니다", Color.Yellow);
-                    if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
-                });
-            };
+            // 브라우저 소유권 변경 이벤트 등록
+            browserState.OnOwnerChanged += OnGlobalBrowserOwnerChanged;
 
             UpdateStatus("브라우저 모드 실행 중 (자동화 준비됨)", Color.Lime);
             btnTranslate.Enabled = true;
 
-            // 선택된 모델 적용
+            // 선택된 모델 적용 (잠시 대기 후)
             _ = Task.Run(async () => {
                 await Task.Delay(3000); 
                 string model = cmbGeminiModel.SelectedIndex == 0 ? "flash" : "pro";
@@ -827,10 +874,32 @@ public partial class MainForm : Form
             UpdateStatus("브라우저 실행 실패", Color.Red);
             AppendLog($"[BrowserMode] 오류: {ex.Message}");
             MessageBox.Show($"브라우저 모드 실행 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            
+            // 실패 시 브라우저 모드 플래그 초기화
+            useBrowserMode = false;
         }
         finally
         {
             btnModeBrowser.Enabled = true;
+        }
+    }
+    
+    /// <summary>
+    /// GlobalBrowserState 소유권 변경 이벤트 핸들러
+    /// </summary>
+    private void OnGlobalBrowserOwnerChanged(BrowserOwner oldOwner, BrowserOwner newOwner)
+    {
+        // MainForm 브라우저 모드가 해제되었을 때 UI 업데이트
+        if (oldOwner == BrowserOwner.MainFormBrowserMode && newOwner != BrowserOwner.MainFormBrowserMode)
+        {
+            BeginInvoke(() =>
+            {
+                browserAutomation = null;
+                useBrowserMode = false;
+                UpdateStatus("브라우저가 종료되었습니다", Color.Yellow);
+                if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
+                AppendLog("[BrowserMode] 브라우저 소유권이 해제되었습니다.");
+            });
         }
     }
     
@@ -997,31 +1066,48 @@ public partial class MainForm : Form
         OpenCustomPromptEditor();
     }
 
-    private void BtnNanoBanana_Click(object? sender, EventArgs e)
+    private async void BtnNanoBanana_Click(object? sender, EventArgs e)
     {
-        // 1. NanoBanana 실행 시 안정성을 위해 WebView 모드로 강제 전환 및 타 모드 차단
+        // 1. MainForm의 브라우저 모드가 활성화되어 있으면 먼저 해제 (포트 충돌 방지)
+        if (useBrowserMode)
+        {
+            AppendLog("[NanoBanana] MainForm 브라우저 모드 해제 중...");
+            await GlobalBrowserState.Instance.ReleaseBrowserAsync(BrowserOwner.MainFormBrowserMode);
+            useBrowserMode = false;
+            browserAutomation = null;
+            if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
+            UpdateStatus("브라우저 모드 해제됨", Color.Yellow);
+        }
+        
+        // 2. NanoBanana 실행 시 안정성을 위해 WebView 모드로 강제 전환 및 타 모드 차단
         if (!useWebView2Mode)
         {
             BtnModeWebView_Click(null, EventArgs.Empty);
         }
         SetMainModesEnabled(false);
 
-        // 2. 폼 생성 및 표시 (임베디드 webView 전달)
-        // EnsureWebViewSettingsForm() 제거됨 - webView는 이미 InitializeWebView2Async()로 준비됨
+        // 3. 폼 생성 및 표시 (임베디드 webView 전달)
         if (automation == null && webView != null) 
         {
-            automation = new GeminiAutomation(webView); // 혹시 null이면 안전장치
+            automation = new GeminiAutomation(webView);
         }
 
         _nanoBananaForm = new NanoBananaMainForm(webView, automation);
         
-        _nanoBananaForm.FormClosed += (ss, ee) =>
+        _nanoBananaForm.FormClosed += async (ss, ee) =>
         {
+            // NanoBanana가 사용한 브라우저 소유권 해제
+            if (GlobalBrowserState.Instance.IsOwnedBy(BrowserOwner.NanoBanana))
+            {
+                await GlobalBrowserState.Instance.ReleaseBrowserAsync(BrowserOwner.NanoBanana);
+                AppendLog("[NanoBanana] 브라우저 소유권 반환됨");
+            }
+            
             _nanoBananaForm = null;
             SetMainModesEnabled(true); // NanoBanana 종료 시 제약 해제
         };
         
-        _nanoBananaForm.Show(); // Owner를 지정하지 않아 독립 창처럼 동작 (사용자 요청: NanoBanana는 혼자 실행 가능)
+        _nanoBananaForm.Show();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -1035,10 +1121,24 @@ public partial class MainForm : Form
             translationCancellation.Cancel();
         }
 
-        // 3. 리소스 정리 (비동기, fire-and-forget - UI 블로킹 방지)
+        // 3. 브라우저 자동화 정리
+        if (browserAutomation is IDisposable disposable)
+        {
+            try { disposable.Dispose(); } catch { }
+        }
+        browserAutomation = null;
+        useBrowserMode = false;
+
+        // 4. GlobalBrowserState 강제 해제 (모든 브라우저 종료)
         _ = Task.Run(async () => {
             try
             {
+                var browserState = GlobalBrowserState.Instance;
+                if (browserState.CurrentOwner != BrowserOwner.None)
+                {
+                    await browserState.ForceReleaseAsync();
+                }
+                
                 httpClient?.Dispose();
                 if (isolatedBrowserManager != null) 
                 {

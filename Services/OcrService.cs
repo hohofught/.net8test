@@ -155,7 +155,7 @@ namespace GeminiWebTranslator.Services
             }
         }
 
-        public async Task<string> ExtractTextAsync(string imagePath)
+        public async Task<string> ExtractTextAsync(string imagePath, bool filterWatermarks = true)
         {
             if (!_isInitialized) 
                 if (!await InitializeAsync()) return "";
@@ -200,15 +200,15 @@ namespace GeminiWebTranslator.Services
                         string? line = Marshal.PtrToStringUTF8(ptr);
                         if (!string.IsNullOrWhiteSpace(line))
                         {
-                            // 워터마크 필터링
-                            if (IsWatermark(line))
+                            // 워터마크 필터링 (옵션)
+                            if (filterWatermarks && IsWatermark(line))
                                 continue;
                             
-                            // 중국어 텍스트만 추출
-                            var chineseText = ExtractChineseOnly(line);
-                            if (!string.IsNullOrEmpty(chineseText))
+                            // CJK 텍스트 추출 (중국어, 일본어, 한국어 모두 포함)
+                            var cjkText = ExtractCjkText(line);
+                            if (!string.IsNullOrEmpty(cjkText))
                             {
-                                lines.Add(chineseText);
+                                lines.Add(cjkText);
                             }
                         }
                     }
@@ -216,8 +216,73 @@ namespace GeminiWebTranslator.Services
                     ReleaseOcrResult(resultHandle);
                     return string.Join("\n", lines);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    System.Diagnostics.Debug.WriteLine($"OCR ExtractText Error: {ex.Message}");
+                    return "";
+                }
+            });
+        }
+
+        /// <summary>
+        /// 모든 텍스트를 추출 (CJK 필터 없이, 워터마크 필터만 선택적으로 적용)
+        /// </summary>
+        public async Task<string> ExtractAllTextAsync(string imagePath, bool filterWatermarks = true)
+        {
+            if (!_isInitialized) 
+                if (!await InitializeAsync()) return "";
+
+            return await Task.Run(() =>
+            {
+                try
+                {
+                    using var bmp = new System.Drawing.Bitmap(imagePath);
+                    var data = bmp.LockBits(new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height), 
+                        System.Drawing.Imaging.ImageLockMode.ReadOnly, 
+                        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                    
+                    var imgStruct = new ImageStructure
+                    {
+                        type = 3,
+                        width = bmp.Width,
+                        height = bmp.Height,
+                        step_size = data.Stride,
+                        data_ptr = data.Scan0
+                    };
+
+                    long resultHandle;
+                    if (RunOcrPipeline(_pipeline, ref imgStruct, _procOpts, out resultHandle) != 0)
+                    {
+                        bmp.UnlockBits(data);
+                        return "";
+                    }
+
+                    bmp.UnlockBits(data);
+
+                    GetOcrLineCount(resultHandle, out long count);
+                    var lines = new List<string>();
+                    
+                    for (long i = 0; i < count; i++)
+                    {
+                        GetOcrLine(resultHandle, i, out long lineHandle);
+                        GetOcrLineContent(lineHandle, out IntPtr ptr);
+                        string? line = Marshal.PtrToStringUTF8(ptr);
+                        if (!string.IsNullOrWhiteSpace(line))
+                        {
+                            // 워터마크 필터링만 적용 (CJK 필터링 없음)
+                            if (filterWatermarks && IsWatermark(line))
+                                continue;
+                            
+                            lines.Add(line.Trim());
+                        }
+                    }
+
+                    ReleaseOcrResult(resultHandle);
+                    return string.Join("\n", lines);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"OCR ExtractAllText Error: {ex.Message}");
                     return "";
                 }
             });
@@ -281,30 +346,97 @@ namespace GeminiWebTranslator.Services
         }
 
         /// <summary>
-        /// 중국어 문자만 추출 (영어, 숫자, 특수문자 제외)
+        /// CJK 텍스트 추출 (중국어, 일본어, 한국어 모두 포함)
+        /// 노이즈 필터링 포함: 반복 문자, 순수 기호, 짧은 텍스트 제거
         /// </summary>
-        private static string ExtractChineseOnly(string text)
+        private static string ExtractCjkText(string text)
         {
-            var chineseChars = new StringBuilder();
+            var cjkChars = new StringBuilder();
             
             foreach (char c in text)
             {
-                // CJK 통합 한자: U+4E00-U+9FFF
+                // CJK 통합 한자: U+4E00-U+9FFF (중국어, 일본어 칸지)
                 // CJK 확장 A: U+3400-U+4DBF
                 // CJK 호환 한자: U+F900-U+FAFF
-                if ((c >= '\u4E00' && c <= '\u9FFF') ||
-                    (c >= '\u3400' && c <= '\u4DBF') ||
-                    (c >= '\uF900' && c <= '\uFAFF'))
+                // 한글 음절: U+AC00-U+D7AF
+                // 한글 자모: U+1100-U+11FF
+                // 히라가나: U+3040-U+309F
+                // 가타카나: U+30A0-U+30FF
+                if ((c >= '\u4E00' && c <= '\u9FFF') ||  // CJK 통합 한자
+                    (c >= '\u3400' && c <= '\u4DBF') ||  // CJK 확장 A
+                    (c >= '\uF900' && c <= '\uFAFF') ||  // CJK 호환 한자
+                    (c >= '\uAC00' && c <= '\uD7AF') ||  // 한글 음절
+                    (c >= '\u1100' && c <= '\u11FF') ||  // 한글 자모
+                    (c >= '\u3040' && c <= '\u309F') ||  // 히라가나
+                    (c >= '\u30A0' && c <= '\u30FF'))    // 가타카나
                 {
-                    chineseChars.Append(c);
+                    cjkChars.Append(c);
                 }
             }
 
-            // 최소 2글자 이상의 중국어가 있어야 함
-            if (chineseChars.Length < 2)
+            var result = cjkChars.ToString();
+            
+            // 최소 2글자 이상의 CJK 텍스트가 있어야 함
+            if (result.Length < 2)
+                return "";
+            
+            // 노이즈 필터링: 같은 문자가 반복되는 경우 제외
+            if (IsRepeatedCharacter(result))
+                return "";
+            
+            // 노이즈 필터링: 의미없는 단일/이중 문자 패턴 제외
+            if (result.Length <= 3 && IsNoisePattern(result))
                 return "";
 
-            return chineseChars.ToString();
+            return result;
+        }
+        
+        /// <summary>
+        /// 같은 문자가 반복되는지 확인 (예: "一一一", "啊啊啊")
+        /// </summary>
+        private static bool IsRepeatedCharacter(string text)
+        {
+            if (string.IsNullOrEmpty(text) || text.Length < 2)
+                return false;
+            
+            char first = text[0];
+            for (int i = 1; i < text.Length; i++)
+            {
+                if (text[i] != first)
+                    return false;
+            }
+            return true;
+        }
+        
+        /// <summary>
+        /// 의미없는 노이즈 패턴인지 확인 (OCR 오인식 패턴)
+        /// </summary>
+        private static bool IsNoisePattern(string text)
+        {
+            // 자주 오인식되는 단일/이중 문자 패턴
+            string[] noisePatterns = {
+                "一", "二", "三", "口", "日", "目", "田", "回",
+                "工", "土", "王", "干", "于", "士", "上", "下",
+                "十", "卜", "人", "入", "八", "力", "刀", "又",
+                "几", "凡", "刃", "丁", "了", "子", "小", "大"
+            };
+            
+            foreach (var pattern in noisePatterns)
+            {
+                if (text == pattern)
+                    return true;
+            }
+            
+            return false;
+        }
+
+        /// <summary>
+        /// 중국어 문자만 추출 (호환성을 위해 유지)
+        /// </summary>
+        [Obsolete("Use ExtractCjkText instead")]
+        private static string ExtractChineseOnly(string text)
+        {
+            return ExtractCjkText(text);
         }
     }
 }
