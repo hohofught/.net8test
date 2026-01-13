@@ -1,0 +1,31 @@
+# .NET Core / C#
+[Bb]in/
+[Oo]bj/
+*.user
+*.userosscache
+*.sln.docstates
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.dll
+*.exe
+*.pdb
+*.orig
+
+# VS Code
+.vscode/
+
+# Project Specific Exclusions
+/chrome_bin/
+/edge_profile/
+/TopSecretProfile/
+/gemini_cookies.json
+/chrome_download.zip
+
+# Others
+*.log
+.DS_Store
