@@ -53,6 +53,9 @@ public partial class NanoBananaMainForm : Form
         
         // FormClosing 이벤트 핸들러 등록 - 브라우저 리소스 정리
         this.FormClosing += NanoBananaMainForm_FormClosing;
+        
+        // MainForm의 항상 위 설정 상속
+        this.TopMost = Forms.MainForm.IsAlwaysOnTop;
     }
     
     /// <summary>

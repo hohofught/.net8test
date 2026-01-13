@@ -269,7 +269,7 @@ public partial class MainForm
         Action<string> onChunk = result =>
         {
             // 새로운 번역 청크가 도착할 때마다 호출됨
-            existingResults.Add(result);
+            // NOTE: TranslationService에서 이미 results 리스트에 추가하므로 여기서는 추가하지 않음
             savedResults = existingResults; // 비정상 종료 시 재개를 위해 상태 저장
             lastTranslatedChunkIndex = existingResults.Count - 1;
 

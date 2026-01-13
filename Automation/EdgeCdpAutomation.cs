@@ -722,6 +722,21 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
                 
                 if (elapsed > 15)
                 {
+                    // 먼저 텍스트 응답 확인 (번역 모드 우선)
+                    var response = await _page.EvaluateFunctionAsync<string>(@"() => {
+                        const responses = document.querySelectorAll('message-content.model-response-text');
+                        if (responses.length === 0) return '';
+                        return responses[responses.length - 1].innerText || '';
+                    }");
+                    
+                    // 텍스트 응답이 있으면 바로 반환 (번역 결과)
+                    if (!string.IsNullOrEmpty(response) && response.Length > 10)
+                    {
+                        Log($"응답 완료 ({elapsed}초, {response.Length}자)");
+                        return response;
+                    }
+                    
+                    // 텍스트 응답이 없을 때만 이미지 생성 확인 (NanoBanana 모드)
                     var hasGeneratedImage = await _page.EvaluateFunctionAsync<bool>(@"() => {
                         const images = document.querySelectorAll(
                             ""img[src*='googleusercontent'], .generated-image, model-response img""
@@ -731,7 +746,7 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
                     
                     if (hasGeneratedImage)
                     {
-                        Log($"응답 생성 완료 ({elapsed}초)");
+                        Log($"이미지 생성 완료 ({elapsed}초)");
                         await Task.Delay(2000);
                         return "image_generated";
                     }
@@ -745,21 +760,6 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
                     {
                         Log("오류: 대답이 중지됨");
                         return "";
-                    }
-                    
-                    if ((DateTime.Now - lastActivityTime).TotalSeconds > 15)
-                    {
-                        var response = await _page.EvaluateFunctionAsync<string>(@"() => {
-                            const responses = document.querySelectorAll('message-content.model-response-text');
-                            if (responses.length === 0) return '';
-                            return responses[responses.length - 1].innerText || '';
-                        }");
-                        
-                        if (!string.IsNullOrEmpty(response))
-                        {
-                            Log($"응답 완료 ({elapsed}초)");
-                            return response;
-                        }
                     }
                 }
                 

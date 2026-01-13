@@ -246,6 +246,7 @@ public partial class MainForm
             Checked = false
         };
         chkAlwaysOnTop.CheckedChanged += (s, e) => {
+            MainForm.IsAlwaysOnTop = chkAlwaysOnTop.Checked;
             this.TopMost = chkAlwaysOnTop.Checked;
             AppendLog(chkAlwaysOnTop.Checked ? "[설정] 항상 위 모드 활성화" : "[설정] 항상 위 모드 비활성화");
         };

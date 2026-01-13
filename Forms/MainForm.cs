@@ -19,6 +19,9 @@ namespace GeminiWebTranslator.Forms;
 /// </summary>
 public partial class MainForm : Form
 {
+    // 항상 위 모드를 다른 폼에서도 참조할 수 있도록 static 속성으로 노출
+    public static bool IsAlwaysOnTop { get; set; } = false;
+    
     #region UI 컨트롤
     private Panel controlPanel = null!;
     
@@ -798,90 +801,69 @@ public partial class MainForm : Form
     /// [브라우저 모드] 버튼 클릭 시 호출 - Puppeteer 기반 독립 브라우저를 컨트롤합니다.
     /// GlobalBrowserState를 통해 NanoBanana와의 충돌을 방지합니다.
     /// </summary>
-    private async void BtnModeBrowser_Click(object? sender, EventArgs e)
+    private Forms.BrowserSettingsForm? _browserSettingsForm;
+
+    /// <summary>
+    /// [브라우저 모드] 버튼 클릭 시 호출 - 브라우저 설정 창을 엽니다.
+    /// </summary>
+    private void BtnModeBrowser_Click(object? sender, EventArgs e)
     {
-        btnModeBrowser.Enabled = false;
-        try
+        // 1. 이미 열려있으면 포커스
+        if (_browserSettingsForm != null && !_browserSettingsForm.IsDisposed)
         {
-            // 다른 모드가 브라우저를 사용 중인지 확인
-            var browserState = GlobalBrowserState.Instance;
-            if (!browserState.CanAcquire(BrowserOwner.MainFormBrowserMode))
-            {
-                var owner = browserState.CurrentOwner;
-                AppendLog($"[BrowserMode] 브라우저가 {owner}에서 사용 중입니다.");
-                MessageBox.Show($"브라우저가 {owner}에서 사용 중입니다.\n먼저 해당 기능을 종료하세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
+            _browserSettingsForm.BringToFront();
+            return;
+        }
 
-            useWebView2Mode = false;
-            useBrowserMode = true;
-            UpdateModeButtonsUI(btnModeBrowser);
-            
-            // NanoBanana와 브라우저 모드는 동시 실행 불가 (포트 충돌 및 리소스 점유 문제)
-            if (btnNanoBanana != null)
+        // 2. 새 폼 생성
+        _browserSettingsForm = new Forms.BrowserSettingsForm();
+        _browserSettingsForm.OnLog += msg => AppendLog($"[BrowserForm] {msg}");
+        
+        // 3. 브라우저 상태 변경 감지
+        _browserSettingsForm.OnBrowserModeChanged += (isConnected) =>
+        {
+            if (isConnected)
             {
-                btnNanoBanana.Enabled = false;
-                AppendLog("[알림] 브라우저 모드 실행 중에는 NanoBanana를 사용할 수 없습니다.");
-            }
-
-            // 기존 자동화 객체 정리
-            if (browserAutomation != null)
-            {
-                AppendLog("[BrowserMode] 기존 브라우저 자동화 세션 정리 중...");
-                try
+                // 연결됨: MainForm 상태 업데이트
+                this.browserAutomation = _browserSettingsForm.CurrentAutomation;
+                this.useBrowserMode = true;
+                this.useWebView2Mode = false;
+                
+                UpdateModeButtonsUI(btnModeBrowser);
+                UpdateStatus("브라우저 모드 활성화됨 (Edge CDP)", Color.Lime);
+                
+                if (btnNanoBanana != null) 
                 {
-                    if (browserAutomation is IDisposable disposable)
-                    {
-                        disposable.Dispose();
-                    }
+                    // NanoBanana 버튼은 활성화 상태 유지 (클릭 시 브라우저 모드 자동 해제)
+                    AppendLog("[알림] 브라우저 모드 중 NanoBanana를 실행하면 브라우저 모드가 자동 해제됩니다.");
                 }
-                catch { }
-                browserAutomation = null;
+                
+                // 모델 선택 동기화 (필요시)
+                _ = Task.Run(async () => {
+                   await Task.Delay(1000);
+                   try {
+                       if (this.browserAutomation != null && cmbGeminiModel != null && !IsDisposed)
+                       {
+                           string model = "flash";
+                           Invoke(() => model = cmbGeminiModel.SelectedIndex == 0 ? "flash" : "pro");
+                           // EdgeCdpAutomation에는 SelectModel이 있나? IGeminiAutomation에는 있음.
+                           // await this.browserAutomation.SelectModelAsync(model); // 필요시 주석 해제
+                       }
+                   } catch {}
+                });
             }
-
-            // GlobalBrowserState를 통해 브라우저 획득
-            AppendLog("[BrowserMode] GlobalBrowserState를 통해 브라우저 획득 시도...");
-            if (!await browserState.AcquireBrowserAsync(BrowserOwner.MainFormBrowserMode, headless: false))
+            else
             {
-                throw new Exception("브라우저 획득에 실패했습니다. 다른 프로세스가 사용 중일 수 있습니다.");
+                // 연결 끊김
+                this.browserAutomation = null;
+                this.useBrowserMode = false;
+                UpdateModeButtonsUI(null);
+                UpdateStatus("브라우저 모드 종료됨", Color.Yellow);
+                if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
             }
-            
-            var browser = browserState.ActiveBrowser;
-            if (browser == null)
-            {
-                throw new Exception("브라우저 실행에 실패했습니다.");
-            }
-            
-            // Puppeteer 기반 자동화 객체 생성 (항상 새로 생성)
-            browserAutomation = new PuppeteerGeminiAutomation(browser);
-            browserAutomation.OnLog += msg => AppendLog(msg);
-            
-            // 브라우저 소유권 변경 이벤트 등록
-            browserState.OnOwnerChanged += OnGlobalBrowserOwnerChanged;
+        };
 
-            UpdateStatus("브라우저 모드 실행 중 (자동화 준비됨)", Color.Lime);
-            btnTranslate.Enabled = true;
-
-            // 선택된 모델 적용 (잠시 대기 후)
-            _ = Task.Run(async () => {
-                await Task.Delay(3000); 
-                string model = cmbGeminiModel.SelectedIndex == 0 ? "flash" : "pro";
-                if (browserAutomation != null) await browserAutomation.SelectModelAsync(model);
-            });
-        }
-        catch (Exception ex)
-        {
-            UpdateStatus("브라우저 실행 실패", Color.Red);
-            AppendLog($"[BrowserMode] 오류: {ex.Message}");
-            MessageBox.Show($"브라우저 모드 실행 오류:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            
-            // 실패 시 브라우저 모드 플래그 초기화
-            useBrowserMode = false;
-        }
-        finally
-        {
-            btnModeBrowser.Enabled = true;
-        }
+        _browserSettingsForm.Show();
     }
     
     /// <summary>
@@ -894,11 +876,16 @@ public partial class MainForm : Form
         {
             BeginInvoke(() =>
             {
-                browserAutomation = null;
-                useBrowserMode = false;
-                UpdateStatus("브라우저가 종료되었습니다", Color.Yellow);
-                if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
-                AppendLog("[BrowserMode] 브라우저 소유권이 해제되었습니다.");
+                // 브라우저 폼이 열려있다면 닫아주거나 상태 업데이트
+                // 여기서는 상태만 업데이트
+                if (useBrowserMode)
+                {
+                    this.browserAutomation = null;
+                    this.useBrowserMode = false;
+                    UpdateModeButtonsUI(null);
+                    UpdateStatus("브라우저가 다른 프로세스에 의해 점유됨", Color.Orange);
+                    if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
+                }
             });
         }
     }
@@ -1068,6 +1055,25 @@ public partial class MainForm : Form
 
     private async void BtnNanoBanana_Click(object? sender, EventArgs e)
     {
+        // 0. 번역 진행 중이면 경고
+        if (isTranslating)
+        {
+            var result = MessageBox.Show(
+                "현재 번역이 진행 중입니다.\n\nNanoBanana를 실행하면 번역이 중단될 수 있습니다.\n계속하시겠습니까?",
+                "번역 진행 중",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            
+            if (result != DialogResult.Yes)
+            {
+                return;
+            }
+            
+            // 번역 중단
+            translationCancellation?.Cancel();
+            AppendLog("[번역] NanoBanana 실행을 위해 번역을 중단합니다.");
+        }
+        
         // 1. MainForm의 브라우저 모드가 활성화되어 있으면 먼저 해제 (포트 충돌 방지)
         if (useBrowserMode)
         {
