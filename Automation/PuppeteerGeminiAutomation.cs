@@ -412,6 +412,61 @@ namespace GeminiWebTranslator
                 return false;
             }
         }
+        
+        /// <summary>
+        /// 현재 선택된 모델을 확인합니다. (flash/pro/unknown)
+        /// </summary>
+        public async Task<string> GetCurrentModelAsync()
+        {
+            try
+            {
+                var page = await GetPageAsync();
+                var result = await page.EvaluateExpressionAsync<string>(GeminiScripts.GetCurrentModelScript);
+                return result?.Trim('"') ?? "unknown";
+            }
+            catch
+            {
+                return "unknown";
+            }
+        }
+        
+        /// <summary>
+        /// 지정된 모델이 현재 선택되어 있는지 확인하고, 아니면 전환합니다.
+        /// 번역 청크 간 모델 드리프트 방지용
+        /// </summary>
+        public async Task<bool> EnsureModelAsync(string targetModel, int maxRetries = 2)
+        {
+            for (int attempt = 0; attempt <= maxRetries; attempt++)
+            {
+                var currentModel = await GetCurrentModelAsync();
+                Log($"현재 모델: {currentModel}, 목표: {targetModel} (시도 {attempt + 1}/{maxRetries + 1})");
+                
+                if (currentModel.Equals(targetModel, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+                
+                // 모델이 다르면 전환 시도
+                var switched = await SelectModelAsync(targetModel);
+                if (switched)
+                {
+                    await Task.Delay(500); // 전환 후 안정화 대기
+                    
+                    // 전환 확인
+                    currentModel = await GetCurrentModelAsync();
+                    if (currentModel.Equals(targetModel, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Log($"모델 전환 성공: {targetModel}");
+                        return true;
+                    }
+                }
+                
+                await Task.Delay(1000); // 재시도 전 대기
+            }
+            
+            Log($"모델 전환 실패: {targetModel}으로 전환할 수 없습니다.");
+            return false;
+        }
 
         // 아래 메서드들은 인터페이스 규격을 맞추기 위한 미구현 항목들입니다.
         public Task<bool> EnableImageGenerationAsync() => Task.FromResult(false);
@@ -510,10 +565,49 @@ namespace GeminiWebTranslator
             try
             {
                 var page = await GetPageAsync();
-                Log("오류 복구 시도 중 (JavaScript 대응책 실행)...");
-                var result = await page.EvaluateExpressionAsync<string>(GeminiScripts.RecoverFromErrorScript);
-                Log($"복구 결과: {result}");
-                return result != null && result.Contains("clicked");
+                Log("오류 복구 시도 중 (종합 대응책 실행)...");
+                
+                // 1. 종합 복구 스크립트 실행
+                var recoveryResult = await page.EvaluateExpressionAsync<string>(GeminiScripts.GeminiPageRecoveryScript);
+                Log($"복구 스크립트 결과: {recoveryResult}");
+                
+                if (!string.IsNullOrEmpty(recoveryResult) && recoveryResult != "null")
+                {
+                    // 페이지 새로고침이 필요한 경우
+                    if (recoveryResult.Contains("needsReload\":true"))
+                    {
+                        Log("페이지 새로고침 필요 - 실행 중...");
+                        await page.ReloadAsync();
+                        await Task.Delay(2000);
+                        
+                        // 입력창 복구
+                        await page.EvaluateExpressionAsync(GeminiScripts.RestoreInputScript);
+                        return true;
+                    }
+                    
+                    // Rate limit 감지됨
+                    if (recoveryResult.Contains("rate_limited"))
+                    {
+                        Log("Rate limit 감지 - 30초 대기 후 재시도 권장");
+                        return false; // 대기가 필요함을 알림
+                    }
+                    
+                    // 다이얼로그 닫기 또는 재시도 버튼 클릭 성공
+                    if (recoveryResult.Contains("dismissed") || recoveryResult.Contains("clicked"))
+                    {
+                        await Task.Delay(500);
+                        return true;
+                    }
+                }
+                
+                // 2. 기존 에러 복구 스크립트도 시도
+                var legacyResult = await page.EvaluateExpressionAsync<string>(GeminiScripts.RecoverFromErrorScript);
+                Log($"레거시 복구 결과: {legacyResult}");
+                
+                // 3. 입력창 복구 시도
+                await page.EvaluateExpressionAsync(GeminiScripts.RestoreInputScript);
+                
+                return legacyResult != null && legacyResult.Contains("clicked");
             }
             catch (Exception ex)
             {

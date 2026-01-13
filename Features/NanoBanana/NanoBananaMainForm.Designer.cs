@@ -1,6 +1,7 @@
 #nullable disable
 using System.Drawing;
 using System.Windows.Forms;
+using GeminiWebTranslator.Services;
 
 namespace GeminiWebTranslator;
 
@@ -89,8 +90,8 @@ partial class NanoBananaMainForm
         // 
         this.AutoScaleDimensions = new System.Drawing.SizeF(7F, 15F);
         this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-        this.BackColor = System.Drawing.Color.FromArgb(30, 30, 35);
-        this.ForeColor = System.Drawing.Color.FromArgb(220, 220, 225);
+        this.BackColor = UiTheme.ColorBackground;
+        this.ForeColor = UiTheme.ColorText;
         this.ClientSize = new System.Drawing.Size(1000, 800);
         this.MinimumSize = new System.Drawing.Size(800, 600);
         this.Controls.Add(this.mainSplit);
@@ -105,7 +106,7 @@ partial class NanoBananaMainForm
         this.mainSplit.Orientation = System.Windows.Forms.Orientation.Horizontal;
         this.mainSplit.SplitterDistance = 500;
         this.mainSplit.SplitterWidth = 6;
-        this.mainSplit.BackColor = System.Drawing.Color.FromArgb(45, 45, 50);
+        this.mainSplit.BackColor = UiTheme.ColorSurfaceLight;
         this.mainSplit.Panel1MinSize = 300;
         this.mainSplit.Panel2MinSize = 100;
         
@@ -128,14 +129,14 @@ partial class NanoBananaMainForm
         this.btnStart.Text = "▶️ 시작";
         this.btnStart.Size = new System.Drawing.Size(100, 40);
         this.btnStart.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
-        this.btnStart.BackColor = System.Drawing.Color.FromArgb(52, 199, 89);
+        this.btnStart.BackColor = UiTheme.ColorSuccess;
         this.btnStart.ForeColor = System.Drawing.Color.White;
         this.btnStart.Margin = new System.Windows.Forms.Padding(0, 0, 10, 0);
         
         this.btnStop.Text = "⏹️ 중지";
         this.btnStop.Size = new System.Drawing.Size(80, 40);
         this.btnStop.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
-        this.btnStop.BackColor = System.Drawing.Color.FromArgb(255, 69, 58);
+        this.btnStop.BackColor = UiTheme.ColorError;
         this.btnStop.ForeColor = System.Drawing.Color.White;
         this.btnStop.Enabled = false;
         this.btnStop.Margin = new System.Windows.Forms.Padding(0, 0, 10, 0);
@@ -143,21 +144,21 @@ partial class NanoBananaMainForm
         this.btnReset.Text = "🔄 리셋";
         this.btnReset.Size = new System.Drawing.Size(80, 40);
         this.btnReset.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
-        this.btnReset.BackColor = System.Drawing.Color.FromArgb(80, 80, 80);
+        this.btnReset.BackColor = UiTheme.ColorSurfaceLight;
         this.btnReset.ForeColor = System.Drawing.Color.White;
         this.btnReset.Margin = new System.Windows.Forms.Padding(0, 0, 10, 0);
         
         this.btnRefresh.Text = "📁 새로고침";
         this.btnRefresh.Size = new System.Drawing.Size(100, 40);
         this.btnRefresh.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
-        this.btnRefresh.BackColor = System.Drawing.Color.FromArgb(80, 80, 100);
+        this.btnRefresh.BackColor = UiTheme.ColorSurfaceLight;
         this.btnRefresh.ForeColor = System.Drawing.Color.White;
         this.btnRefresh.Margin = new System.Windows.Forms.Padding(0, 0, 10, 0);
         
         this.btnShowBrowser.Text = "🔳 창 키우기";
         this.btnShowBrowser.Size = new System.Drawing.Size(100, 40);
         this.btnShowBrowser.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
-        this.btnShowBrowser.BackColor = System.Drawing.Color.FromArgb(100, 80, 140);
+        this.btnShowBrowser.BackColor = UiTheme.ColorPrimary;
         this.btnShowBrowser.ForeColor = System.Drawing.Color.White;
         this.btnShowBrowser.Margin = new System.Windows.Forms.Padding(0, 0, 20, 0);
         
@@ -173,7 +174,7 @@ partial class NanoBananaMainForm
         this.btnHideBrowser.Text = "🔽 숨기기";
         this.btnHideBrowser.Size = new System.Drawing.Size(90, 40);
         this.btnHideBrowser.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
-        this.btnHideBrowser.BackColor = System.Drawing.Color.FromArgb(70, 70, 80);
+        this.btnHideBrowser.BackColor = UiTheme.ColorSurfaceLight;
         this.btnHideBrowser.ForeColor = System.Drawing.Color.White;
         this.btnHideBrowser.Margin = new System.Windows.Forms.Padding(0, 0, 10, 0);
         
@@ -188,7 +189,7 @@ partial class NanoBananaMainForm
         this.innerSplit.Orientation = System.Windows.Forms.Orientation.Horizontal;
         this.innerSplit.SplitterDistance = 230;
         this.innerSplit.SplitterWidth = 6;
-        this.innerSplit.BackColor = System.Drawing.Color.FromArgb(45, 45, 50);
+        this.innerSplit.BackColor = UiTheme.ColorSurfaceLight;
         this.innerSplit.Panel1MinSize = 180;
         this.innerSplit.Panel2MinSize = 100;
 
@@ -231,7 +232,7 @@ partial class NanoBananaMainForm
         
         this.btnLaunchIsolated.Text = "🚀 Chrome 실행/설치";
         this.btnLaunchIsolated.Size = new System.Drawing.Size(180, 32);
-        this.btnLaunchIsolated.BackColor = System.Drawing.Color.FromArgb(60, 120, 210);
+        this.btnLaunchIsolated.BackColor = UiTheme.ColorPrimary;
         this.btnLaunchIsolated.ForeColor = System.Drawing.Color.White;
         this.btnLaunchIsolated.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
         this.btnLaunchIsolated.Cursor = System.Windows.Forms.Cursors.Hand;
@@ -258,14 +259,14 @@ partial class NanoBananaMainForm
         this.lblInput.Dock = System.Windows.Forms.DockStyle.Fill;
         
         this.txtInputFolder.Dock = System.Windows.Forms.DockStyle.Fill;
-        this.txtInputFolder.BackColor = System.Drawing.Color.FromArgb(40, 40, 45);
+        this.txtInputFolder.BackColor = UiTheme.ColorSurface;
         this.txtInputFolder.ForeColor = System.Drawing.Color.White;
         this.txtInputFolder.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
         
         this.btnBrowseInput.Text = "...";
         this.btnBrowseInput.Dock = System.Windows.Forms.DockStyle.Fill;
         this.btnBrowseInput.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
-        this.btnBrowseInput.BackColor = System.Drawing.Color.FromArgb(60, 60, 65);
+        this.btnBrowseInput.BackColor = UiTheme.ColorSurfaceLight;
         
         this.layoutSettings.Controls.Add(this.lblInput, 0, 1);
         this.layoutSettings.Controls.Add(this.txtInputFolder, 1, 1);
@@ -277,14 +278,14 @@ partial class NanoBananaMainForm
         this.lblOutput.Dock = System.Windows.Forms.DockStyle.Fill;
         
         this.txtOutputFolder.Dock = System.Windows.Forms.DockStyle.Fill;
-        this.txtOutputFolder.BackColor = System.Drawing.Color.FromArgb(40, 40, 45);
+        this.txtOutputFolder.BackColor = UiTheme.ColorSurface;
         this.txtOutputFolder.ForeColor = System.Drawing.Color.White;
         this.txtOutputFolder.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
         
         this.btnBrowseOutput.Text = "...";
         this.btnBrowseOutput.Dock = System.Windows.Forms.DockStyle.Fill;
         this.btnBrowseOutput.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
-        this.btnBrowseOutput.BackColor = System.Drawing.Color.FromArgb(60, 60, 65);
+        this.btnBrowseOutput.BackColor = UiTheme.ColorSurfaceLight;
         
         this.layoutSettings.Controls.Add(this.lblOutput, 0, 2);
         this.layoutSettings.Controls.Add(this.txtOutputFolder, 1, 2);
@@ -333,7 +334,7 @@ partial class NanoBananaMainForm
         this.txtPrompt.Dock = System.Windows.Forms.DockStyle.Fill;
         this.txtPrompt.Multiline = true;
         this.txtPrompt.ScrollBars = System.Windows.Forms.ScrollBars.Vertical;
-        this.txtPrompt.BackColor = System.Drawing.Color.FromArgb(40, 40, 45);
+        this.txtPrompt.BackColor = UiTheme.ColorSurface;
         this.txtPrompt.ForeColor = System.Drawing.Color.White;
         this.txtPrompt.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
         
@@ -356,7 +357,7 @@ partial class NanoBananaMainForm
         this.grpImageList.ForeColor = System.Drawing.Color.WhiteSmoke;
         
         this.dgvImages.Dock = System.Windows.Forms.DockStyle.Fill;
-        this.dgvImages.BackgroundColor = System.Drawing.Color.FromArgb(30, 30, 35);
+        this.dgvImages.BackgroundColor = UiTheme.ColorBackground;
         this.dgvImages.BorderStyle = System.Windows.Forms.BorderStyle.None;
         this.dgvImages.RowHeadersVisible = false;
         this.dgvImages.AllowUserToAddRows = false;
@@ -364,10 +365,10 @@ partial class NanoBananaMainForm
         this.dgvImages.ReadOnly = true;
         this.dgvImages.SelectionMode = System.Windows.Forms.DataGridViewSelectionMode.FullRowSelect;
         this.dgvImages.AutoSizeColumnsMode = System.Windows.Forms.DataGridViewAutoSizeColumnsMode.Fill;
-        this.dgvImages.DefaultCellStyle.BackColor = System.Drawing.Color.FromArgb(30, 30, 35);
+        this.dgvImages.DefaultCellStyle.BackColor = UiTheme.ColorBackground;
         this.dgvImages.DefaultCellStyle.ForeColor = System.Drawing.Color.White;
-        this.dgvImages.DefaultCellStyle.SelectionBackColor = System.Drawing.Color.FromArgb(140, 80, 180);
-        this.dgvImages.ColumnHeadersDefaultCellStyle.BackColor = System.Drawing.Color.FromArgb(40, 40, 45);
+        this.dgvImages.DefaultCellStyle.SelectionBackColor = UiTheme.ColorPrimary;
+        this.dgvImages.ColumnHeadersDefaultCellStyle.BackColor = UiTheme.ColorSurface;
         this.dgvImages.ColumnHeadersDefaultCellStyle.ForeColor = System.Drawing.Color.White;
         this.dgvImages.EnableHeadersVisualStyles = false;
         
@@ -393,8 +394,8 @@ partial class NanoBananaMainForm
         this.grpLog.Controls.Add(this.txtLog);
         
         this.txtLog.Dock = System.Windows.Forms.DockStyle.Fill;
-        this.txtLog.BackColor = System.Drawing.Color.FromArgb(20, 20, 25);
-        this.txtLog.ForeColor = System.Drawing.Color.FromArgb(180, 255, 180);
+        this.txtLog.BackColor = UiTheme.ColorBackground;
+        this.txtLog.ForeColor = UiTheme.ColorSuccess;
         this.txtLog.BorderStyle = System.Windows.Forms.BorderStyle.None;
         this.txtLog.Font = new System.Drawing.Font("Consolas", 9F);
         this.txtLog.ReadOnly = true;

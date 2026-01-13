@@ -202,13 +202,34 @@ const GeminiCommon = {
     },
 
     /**
-     * 최신 응답 텍스트 가져오기
+     * 최신 응답 텍스트 가져오기 (이미지 응답 필터링 포함)
      * @returns {string}
      */
     getLatestResponse: function () {
         const responses = this.getResponseElements();
         if (responses.length === 0) return '';
-        return (responses[responses.length - 1].innerText || '').trim();
+
+        const lastResponse = responses[responses.length - 1];
+
+        // 1. 마크다운 영역에서 추출
+        const markdownEl = lastResponse.querySelector('.markdown');
+        if (markdownEl) {
+            const text = markdownEl.innerText || '';
+            const cleaned = text.trim()
+                .replace(/^image_generated\s*/gi, '')
+                .replace(/^\[이미지[^\]]*\]\s*/gi, '')
+                .replace(/^\[Image[^\]]*\]\s*/gi, '');
+            if (cleaned.length > 0) return cleaned;
+        }
+
+        // 2. innerText에서 이미지 관련 텍스트 필터링
+        let text = (lastResponse.innerText || '').trim();
+        text = text
+            .replace(/^image_generated\s*/gi, '')
+            .replace(/^\[이미지[^\]]*\]\s*/gi, '')
+            .replace(/^\[Image[^\]]*\]\s*/gi, '');
+
+        return text;
     },
 
     /**

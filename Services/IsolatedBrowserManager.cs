@@ -20,7 +20,7 @@ namespace GeminiWebTranslator.Services
         private const string ChromeApiUrl = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
         
         // 핵심 경로 설정
-        private static string BasePath => Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location) ?? "";
+        private static string BasePath => AppContext.BaseDirectory;
         
         /// <summary> 브라우저 실행 파일이 설치되는 폴더 경로입니다. </summary>
         public static string BrowserFolder => Path.Combine(BasePath, "chrome_bin");

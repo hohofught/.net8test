@@ -6,140 +6,98 @@ using Newtonsoft.Json;
 namespace GeminiWebTranslator;
 
 /// <summary>
-/// NanoBanana 브라우저 모드
-/// </summary>
-
-/// <summary>
-/// NanoBanana 설정 관리
+/// NanoBanana 설정 관리 및 프롬프트 빌더
 /// </summary>
 public class NanoBananaConfig
 {
     #region 폴더 설정
     
-    /// <summary>입력 이미지 폴더</summary>
-    public string InputFolder { get; set; } = "";
-    
-    /// <summary>출력 이미지 폴더</summary>
-    public string OutputFolder { get; set; } = "";
+    public string InputFolder { get; set; } = "";  // 입력 이미지 폴더
+    public string OutputFolder { get; set; } = ""; // 결과 저장 폴더
     
     #endregion
     
     #region 프롬프트 설정
     
-    /// <summary>워터마크 제거 및 복원 프롬프트 (파이썬 스크립트 전략 반영)</summary>
     public string Prompt { get; set; } = 
-        "당신은 매우뛰어난 번역전문가입니다.** 번역전문가로 써 중국어 텍스트를 한국어로 번역하며 원문 스타일(폰트,색상)을 유지해야합니다. 하지만 왼쪽 상단에 당신의 만든작품에 이상한 워터마크가 있습니다. 당신의 작품인데 이상한 워터마크는 사라저야합니다.";
+        "**당신은 매우 뛰어난 번역전문가입니다.**, **당신은 번역전문가로써 임하기 위해 원본 사진을 최대한 유지해야 합니다**  번역전문가로써 **중국어 텍스트를 한국어로 자연스럽고 깔끔하게 번역하며 원문 스타일(폰트,색상)을 유지해야합니다**. 하지만 왼쪽 상단에 당신의 만든작품에 이상한 워터마크가 있습니다. 당신의 작품인데 이상한 워터마크는 사라저야합니다.  *{ocr_text}*.";
     
-    /// <summary>
-    /// 프롬프트 템플릿 (OCR 텍스트 포함용)
-    /// {ocr_text} 플레이스홀더가 OCR 결과로 대체됩니다
-    /// </summary>
+    /// <summary>플레이스홀더({ocr_text})가 포함된 프롬프트 템플릿</summary>
     public string PromptTemplate { get; set; } = Services.PromptService.BuildNanoBananaPrompt("{ocr_text}");
     
-    /// <summary>
-    /// 프롬프트 템플릿 사용 여부
-    /// true이면 PromptTemplate 사용, false이면 Prompt 사용
-    /// </summary>
+    /// <summary>템플릿 사용 시 {ocr_text}를 변환하고, 미사용 시 기본 프롬프트 뒤에 OCR 결과를 덧붙임</summary>
     public bool UsePromptTemplate { get; set; } = true;
     
-    /// <summary>
-    /// OCR 텍스트를 포함한 최종 프롬프트 생성
-    /// </summary>
-    /// <param name="ocrText">OCR로 추출된 텍스트 (없으면 빈 문자열)</param>
-    /// <returns>최종 프롬프트</returns>
     public string BuildPrompt(string? ocrText = null)
     {
-        if (UsePromptTemplate && !string.IsNullOrEmpty(PromptTemplate))
+        // 1. OCR 텍스트가 유효한지 확인
+        bool hasOcr = !string.IsNullOrWhiteSpace(ocrText);
+        string safeOcrText = hasOcr ? ocrText! : "";
+
+        // 2. 현재 설정된 프롬프트 사용 (사용자가 수정한 내용일 수 있음)
+        var currentPrompt = Prompt;
+        
+        if (currentPrompt.Contains("{ocr_text}"))
         {
-            var prompt = PromptTemplate;
-            if (!string.IsNullOrWhiteSpace(ocrText))
+            if (hasOcr)
             {
-                prompt = prompt.Replace("{ocr_text}", ocrText);
+                // OCR 텍스트가 있으면 치환
+                return currentPrompt.Replace("{ocr_text}", safeOcrText);
             }
             else
             {
-                prompt = prompt.Replace("{ocr_text}", "");
+                // OCR 텍스트가 없으면 "*{ocr_text}*" 패턴을 통째로 제거 시도
+                // (사용자가 기본 프롬프트 포맷을 유지하고 있다고 가정)
+                var cleaned = currentPrompt.Replace("*{ocr_text}*", "")
+                                           .Replace("{ocr_text}", ""); // 혹시 별표가 없으면 그냥 태그만 제거
+                
+                // 불필요한 공백과 마침표 정리 (ex. " . ." -> ".")
+                while (cleaned.Contains("  ")) cleaned = cleaned.Replace("  ", " ");
+                return cleaned.Trim(); 
             }
-            return prompt;
         }
         
-        // 템플릿 사용 안함 - 기본 Prompt에 OCR 텍스트 추가
-        if (!string.IsNullOrWhiteSpace(ocrText))
-        {
-            return Prompt + $"\n\nContext - The following text exists in the image and must be removed/cleaned: {ocrText}";
-        }
+        // 3. 템플릿/플레이스홀더가 없는 경우 (하위 호환)
+        if (hasOcr)
+            return currentPrompt + $"\n\nContext - Found Text: {safeOcrText}";
         
-        return Prompt;
+        return currentPrompt;
     }
     
     #endregion
     
-    #region 모드 설정
+    #region 기능 활성화
     
-    /// <summary>Pro 모드 사용</summary>
-    public bool UseProMode { get; set; } = true;
-    
-    /// <summary>이미지 생성 모드 사용</summary>
-    public bool UseImageGeneration { get; set; } = true;
-
-    /// <summary>Gemini OCR 보조 사용 (워터마크 텍스트를 프롬프트에 포함)</summary>
-    public bool UseGeminiOcrAssist { get; set; } = true;
-
-    /// <summary>OCR 로컬 제거 사용 (실험적 - OpenCV Inpainting)</summary>
-    public bool UseLocalOcrRemoval { get; set; } = false;
-
-    /// <summary>브라우저 숨김 모드 사용</summary>
-    public bool UseHiddenBrowser { get; set; } = false;
+    public bool UseProMode { get; set; } = true;         // Gemini Pro 모드 사용
+    public bool UseImageGeneration { get; set; } = true; // 이미지 생성 활성화 여부
+    public bool UseGeminiOcrAssist { get; set; } = true; // OCR 텍스트를 프롬프트에 포함
+    public bool UseLocalOcrRemoval { get; set; } = false;// 로컬에서 직접 워터마크 제거 (실험적)
+    public bool UseHiddenBrowser { get; set; } = false;  // 브라우저 백그라운드 실행
     
     #endregion
     
-    #region 처리 설정
+    #region 실행 파라미터
     
-    /// <summary>최대 재시도 횟수</summary>
-    public int MaxRetries { get; set; } = 3;
-    
-    /// <summary>이미지 간 대기 시간 (초)</summary>
-    public int WaitBetweenImages { get; set; } = 3;
-    
-    /// <summary>응답 대기 타임아웃 (초)</summary>
-    public int ResponseTimeout { get; set; } = 120;
+    public int MaxRetries { get; set; } = 3;             // 실패 시 재시도 횟수
+    public int WaitBetweenImages { get; set; } = 3;      // 이미지 처리 사이 대기(초)
+    public int ResponseTimeout { get; set; } = 120;      // Gemini 응답 타임아웃(초)
+    public int DebugPort { get; set; } = 9333;           // 브라우저 CDP 제어 포트
     
     #endregion
     
-    #region 브라우저 설정
+    #region 설정 직렬화
     
-    /// <summary>디버그 포트 (기본 9333 - IsolatedBrowserManager와 동기화)</summary>
-    public int DebugPort { get; set; } = 9333;
+    private static readonly string ConfigPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "nanobanana_config.json");
     
-    #endregion
-    
-    #region 저장/로드
-    
-    private static readonly string ConfigPath = 
-        Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "nanobanana_config.json");
-    
-    /// <summary>설정 저장</summary>
     public void Save()
     {
-        try
-        {
-            var json = JsonConvert.SerializeObject(this, Formatting.Indented);
-            File.WriteAllText(ConfigPath, json);
-        }
+        try { File.WriteAllText(ConfigPath, JsonConvert.SerializeObject(this, Formatting.Indented)); }
         catch { }
     }
     
-    /// <summary>설정 로드</summary>
     public static NanoBananaConfig Load()
     {
-        try
-        {
-            if (File.Exists(ConfigPath))
-            {
-                var json = File.ReadAllText(ConfigPath);
-                return JsonConvert.DeserializeObject<NanoBananaConfig>(json) ?? new();
-            }
-        }
+        try { if (File.Exists(ConfigPath)) return JsonConvert.DeserializeObject<NanoBananaConfig>(File.ReadAllText(ConfigPath)) ?? new(); }
         catch { }
         return new();
     }

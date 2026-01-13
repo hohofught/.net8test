@@ -18,24 +18,48 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="Resources\OCR\oneocr.dll">
+    <!-- OCR 파일들은 조건부 복사 (자동 추출 기능이 있으므로 필수 아님) -->
+    <Content Include="Resources\OCR\oneocr.dll" Condition="Exists('Resources\OCR\oneocr.dll')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="Resources\OCR\oneocr.onemodel">
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="Resources\OCR\oneocr.onemodel" Condition="Exists('Resources\OCR\oneocr.onemodel')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="Resources\Scripts\NanoBananaAutomation.js">
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="Resources\OCR\onnxruntime.dll" Condition="Exists('Resources\OCR\onnxruntime.dll')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="Resources\Scripts\GeminiCommon.js">
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+    <!-- JavaScript 스크립트 파일들 - 단일 EXE에 포함 (런타임에 추출됨) -->
+    <Content Include="Resources\Scripts\NanoBananaAutomation.js">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="Resources\Scripts\BrowserModeAutomation.js">
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="Resources\Scripts\GeminiCommon.js">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="Resources\Scripts\GeminiCompatibilityCheck.js">
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="Resources\Scripts\BrowserModeAutomation.js">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="Resources\Scripts\GeminiCompatibilityCheck.js">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
   </ItemGroup>
+
+  <!-- 빌드 시 Resources/OCR 폴더 생성 (자동 추출을 위해) -->
+  <Target Name="EnsureOcrFolder" BeforeTargets="Build">
+    <MakeDir Directories="$(OutputPath)Resources\OCR" Condition="!Exists('$(OutputPath)Resources\OCR')" />
+  </Target>
 
 </Project>

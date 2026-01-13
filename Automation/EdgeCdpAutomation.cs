@@ -499,7 +499,19 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
                 Timeout = 30000
             });
             
-            await Task.Delay(1500);
+            // 페이지 로드 안정화 대기 (2초로 증가)
+            await Task.Delay(2000);
+            
+            // JS 실행 가능 여부 확인 (페이지 크래시 등 감지)
+            try 
+            {
+                await _page.EvaluateExpressionAsync("1+1");
+            }
+            catch 
+            {
+                Log("경고: JS 실행 불가, 추가 대기...");
+                await Task.Delay(2000);
+            }
             
             // 자동화 감지 우회 재주입
             await InjectAntiDetectionAsync();
@@ -722,21 +734,88 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
                 
                 if (elapsed > 15)
                 {
-                    // 먼저 텍스트 응답 확인 (번역 모드 우선)
+                    // 먼저 텍스트 응답 확인 (번역 모드 우선) - 개선된 추출 로직
                     var response = await _page.EvaluateFunctionAsync<string>(@"() => {
-                        const responses = document.querySelectorAll('message-content.model-response-text');
+                        const responses = document.querySelectorAll('message-content.model-response-text, .model-response-text');
                         if (responses.length === 0) return '';
-                        return responses[responses.length - 1].innerText || '';
+                        
+                        const lastResponse = responses[responses.length - 1];
+                        
+                        // 1. 마크다운 영역에서 텍스트 추출 (우선)
+                        const markdownEl = lastResponse.querySelector('.markdown');
+                        if (markdownEl) {
+                            let text = markdownEl.innerText || '';
+                            // 이미지 생성 관련 메타 텍스트 필터링
+                            text = text.trim()
+                                .replace(/^image_generated\s*/gi, '')
+                                .replace(/^\[이미지[^\]]*\]\s*/gi, '')
+                                .replace(/^\[Image[^\]]*\]\s*/gi, '')
+                                .replace(/^이미지를?\s*생성.*?\n?/gi, '')
+                                .replace(/^I('ve| have)?\s*generated.*?image.*?\n?/gi, '');
+                            if (text.length > 5) return text;
+                        }
+                        
+                        // 2. 코드 블록 영역 확인
+                        const codeBlocks = lastResponse.querySelectorAll('code-block, pre code');
+                        if (codeBlocks.length > 0) {
+                            let codeText = '';
+                            codeBlocks.forEach(block => {
+                                const code = block.innerText || block.textContent || '';
+                                codeText += code + '\n';
+                            });
+                            if (codeText.trim().length > 5) return codeText.trim();
+                        }
+                        
+                        // 3. 일반 텍스트 추출 (이미지 버튼 영역 제외)
+                        let text = '';
+                        const walker = document.createTreeWalker(lastResponse, NodeFilter.SHOW_TEXT, {
+                            acceptNode: function(node) {
+                                const parent = node.parentElement;
+                                if (parent && (
+                                    parent.closest('button.image-button') ||
+                                    parent.closest('.image-container') ||
+                                    parent.closest('[data-image]') ||
+                                    parent.closest('.generated-image') ||
+                                    parent.tagName === 'BUTTON'
+                                )) {
+                                    return NodeFilter.FILTER_REJECT;
+                                }
+                                return NodeFilter.FILTER_ACCEPT;
+                            }
+                        });
+                        
+                        let node;
+                        while (node = walker.nextNode()) {
+                            text += node.textContent;
+                        }
+                        
+                        text = text.trim()
+                            .replace(/^image_generated\s*/gi, '')
+                            .replace(/^\[이미지[^\]]*\]\s*/gi, '')
+                            .replace(/^\[Image[^\]]*\]\s*/gi, '');
+                        
+                        return text;
                     }");
                     
-                    // 텍스트 응답이 있으면 바로 반환 (번역 결과)
-                    if (!string.IsNullOrEmpty(response) && response.Length > 10)
+                    // 텍스트 응답이 있고 'image_generated'가 아니면 반환
+                    if (!string.IsNullOrEmpty(response) && 
+                        response.Length > 10 && 
+                        !response.Trim().Equals("image_generated", StringComparison.OrdinalIgnoreCase))
                     {
-                        Log($"응답 완료 ({elapsed}초, {response.Length}자)");
-                        return response;
+                        // 최종 필터링: C# 측에서도 image_generated 제거
+                        response = System.Text.RegularExpressions.Regex.Replace(
+                            response, @"^image_generated\s*", "", 
+                            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                        
+                        if (response.Length > 5)
+                        {
+                            Log($"응답 완료 ({elapsed}초, {response.Length}자)");
+                            return response;
+                        }
                     }
                     
-                    // 텍스트 응답이 없을 때만 이미지 생성 확인 (NanoBanana 모드)
+                    // 텍스트 응답이 없을 때만 이미지 생성 확인 (NanoBanana 모드 전용)
+                    // 번역 모드에서는 이 분기에 도달하지 않아야 함
                     var hasGeneratedImage = await _page.EvaluateFunctionAsync<bool>(@"() => {
                         const images = document.querySelectorAll(
                             ""img[src*='googleusercontent'], .generated-image, model-response img""
@@ -744,11 +823,29 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
                         return images.length > 0;
                     }");
                     
+                    // 이미지가 있더라도, 텍스트 응답이 있는지 다시 한번 체크
                     if (hasGeneratedImage)
                     {
-                        Log($"이미지 생성 완료 ({elapsed}초)");
+                        // 마지막으로 한번 더 텍스트 추출 시도
+                        var textCheck = await _page.EvaluateFunctionAsync<string>(@"() => {
+                            const responses = document.querySelectorAll('message-content.model-response-text .markdown');
+                            if (responses.length === 0) return '';
+                            const text = responses[responses.length - 1].innerText || '';
+                            return text.trim()
+                                .replace(/^image_generated\s*/gi, '')
+                                .replace(/^\[이미지[^\]]*\]\s*/gi, '');
+                        }");
+                        
+                        if (!string.IsNullOrEmpty(textCheck) && textCheck.Length > 10)
+                        {
+                            Log($"이미지와 함께 텍스트 응답 발견 ({elapsed}초, {textCheck.Length}자)");
+                            return textCheck;
+                        }
+                        
+                        // 정말 텍스트가 없으면 NanoBanana 모드용 반환
+                        Log($"이미지 생성 완료 (텍스트 없음, {elapsed}초)");
                         await Task.Delay(2000);
-                        return "image_generated";
+                        return "[이미지가 생성되었습니다. 텍스트 내용이 없습니다.]";
                     }
                     
                     var hasError = await _page.EvaluateFunctionAsync<bool>(@"() => {
@@ -759,17 +856,20 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
                     if (hasError)
                     {
                         Log("오류: 대답이 중지됨");
-                        return "";
+                        return "[오류: 답변 생성이 중단되었습니다.]";
                     }
                 }
                 
                 var currentResponse = await _page.EvaluateFunctionAsync<string>(@"() => {
                     const responses = document.querySelectorAll('message-content.model-response-text');
                     if (responses.length === 0) return '';
-                    return responses[responses.length - 1].innerText || '';
+                    const text = responses[responses.length - 1].innerText || '';
+                    // 실시간 모니터링용 - image_generated 필터링
+                    return text.trim().replace(/^image_generated\s*/gi, '');
                 }");
                 
-                if (!string.IsNullOrEmpty(currentResponse))
+                if (!string.IsNullOrEmpty(currentResponse) && 
+                    !currentResponse.Trim().Equals("image_generated", StringComparison.OrdinalIgnoreCase))
                 {
                     if (currentResponse == lastResponse)
                     {
@@ -796,8 +896,16 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
             }
         }
         
+        // 타임아웃 시에도 image_generated 필터링
+        if (!string.IsNullOrEmpty(lastResponse))
+        {
+            lastResponse = System.Text.RegularExpressions.Regex.Replace(
+                lastResponse, @"^image_generated\s*", "", 
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        }
+        
         Log("응답 타임아웃");
-        return lastResponse;
+        return string.IsNullOrEmpty(lastResponse) ? "[응답 시간 초과]" : lastResponse;
     }
     
     public async Task<string> GenerateContentAsync(string prompt)
@@ -836,6 +944,13 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
         Log("업로드 메뉴 열기 (서브메뉴 클릭으로 input 생성)...");
         try
         {
+            // 0. 페이지 안정화 대기 (JS 실행 가능 여부 확인)
+            try { await _page.EvaluateExpressionAsync("1+1"); }
+            catch {
+                Log("JS 실행 불가, 잠시 대기...");
+                await Task.Delay(1000);
+            }
+
             // 1. 메인 업로드 버튼 클릭 (+ 버튼)
             var menuResult = await _page.EvaluateFunctionAsync<string>(@"() => {
                 const selectors = [
@@ -846,7 +961,7 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
                 ];
                 for (const sel of selectors) {
                     const btn = document.querySelector(sel);
-                    if (btn) { 
+                    if (btn && btn.offsetParent !== null) { // 보이는 버튼만
                         btn.click(); 
                         return 'menu_opened'; 
                     }
@@ -860,26 +975,34 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
                 return false;
             }
             
-            await Task.Delay(500); // Python 타이밍 참조: 500ms
+            // 메뉴 애니메이션/렌더링 대기
+            await Task.Delay(600); 
             
-            // 2. [핵심] 서브메뉴(파일 업로드) 버튼 클릭 - input[type=file] 동적 생성 유도
-            // PuppeteerSharp의 UploadFileAsync는 네이티브 다이얼로그를 트리거하지 않으므로 안전
-            var submenuResult = await _page.EvaluateFunctionAsync<string>(@"() => {
-                const selectors = [
-                    'button[aria-label=""파일 업로드. 문서, 데이터, 코드 파일""]',
-                    'button[aria-label*=""파일 업로드""]',
-                    'button[aria-label*=""Upload file""]',
-                    'button[aria-label=""File upload. Documents, data files, or code""]'
-                ];
-                for (const sel of selectors) {
-                    const btn = document.querySelector(sel);
-                    if (btn) { 
-                        btn.click(); 
-                        return 'submenu_clicked'; 
+            // 2. [핵심] 서브메뉴(파일 업로드) 버튼 존재 확인 및 클릭
+            // 단순히 클릭만 하는게 아니라, 요소가 준비될 때까지 잠시 대기
+            var submenuResult = "not_found";
+            for(int i=0; i<3; i++) // 최대 3회 시도
+            {
+                submenuResult = await _page.EvaluateFunctionAsync<string>(@"() => {
+                    const selectors = [
+                        'button[aria-label=""파일 업로드. 문서, 데이터, 코드 파일""]',
+                        'button[aria-label*=""파일 업로드""]',
+                        'button[aria-label*=""Upload file""]',
+                        'button[aria-label=""File upload. Documents, data files, or code""]'
+                    ];
+                    for (const sel of selectors) {
+                        const btn = document.querySelector(sel);
+                        if (btn && btn.offsetParent !== null) { // 보이는 버튼만
+                            btn.click(); 
+                            return 'submenu_clicked'; 
+                        }
                     }
-                }
-                return 'not_found';
-            }");
+                    return 'not_found';
+                }");
+                
+                if (submenuResult == "submenu_clicked") break;
+                await Task.Delay(300);
+            }
             
             if (submenuResult == "submenu_clicked")
             {
@@ -887,10 +1010,11 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
             }
             else
             {
-                Log("서브메뉴를 찾을 수 없음, 직접 input 검색 시도...");
+                Log("서브메뉴를 찾을 수 없음 또는 클릭 불가");
+                return false;
             }
             
-            await Task.Delay(300); // Python 타이밍 참조
+            await Task.Delay(500); // input 생성 대기
             
             return true;
         }
@@ -1075,7 +1199,7 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
         }
     }
     
-    /// <summary>현재 채팅 삭제 - 상단 메뉴 버튼 사용</summary>
+    /// <summary>현재 채팅 삭제 - 강화된 JS 로직</summary>
     public async Task<bool> DeleteCurrentChatAsync()
     {
         // 연결 상태 확인
@@ -1088,83 +1212,149 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
         Log("채팅 삭제 중...");
         try
         {
-            // 1. 상단의 대화 작업 메뉴 버튼 클릭
-            var menuResult = await _page!.EvaluateFunctionAsync<string>(@"() => {
-                const selectors = [
-                    'button.conversation-actions-menu-button',
-                    'button[aria-label=""대화 작업 메뉴 열기""]',
-                    'button[aria-label*=""대화 작업""]',
-                    'button[aria-label=""Open conversation actions menu""]',
-                    'button[aria-label*=""actions""]',
-                    'button[data-test-id=""conversation-menu-button""]'
-                ];
-                for (const sel of selectors) {
-                    const btn = document.querySelector(sel);
-                    if (btn && btn.offsetParent !== null) { 
-                        btn.scrollIntoView({ behavior: 'instant', block: 'center' });
-                        btn.click(); 
-                        return 'ok'; 
+            // 0. JS 실행 가능 여부 확인
+            try { await _page!.EvaluateExpressionAsync("1+1"); }
+            catch {
+                Log("JS 실행 불가, 잠시 대기...");
+                await Task.Delay(1000);
+            }
+            
+            // 1. 상단의 대화 작업 메뉴 버튼 클릭 (재시도 포함)
+            string menuResult = "not_found";
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                menuResult = await _page!.EvaluateFunctionAsync<string>(@"() => {
+                    // 다양한 셀렉터 (Gemini UI 버전별 대응)
+                    const selectors = [
+                        'button.conversation-actions-menu-button',
+                        'button[aria-label=""대화 작업 메뉴 열기""]',
+                        'button[aria-label*=""대화 작업""]',
+                        'button[aria-label=""Open conversation actions menu""]',
+                        'button[aria-label*=""conversation""][aria-label*=""action""]',
+                        'button[aria-label*=""actions""]',
+                        'button[data-test-id=""conversation-menu-button""]',
+                        // 아이콘 기반 폴백 (점 3개 메뉴)
+                        'button mat-icon:has(svg path[d*=""M12""])',
+                        '.header-actions button:last-child'
+                    ];
+                    for (const sel of selectors) {
+                        try {
+                            const btn = document.querySelector(sel);
+                            if (btn && btn.offsetParent !== null) { 
+                                btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+                                btn.focus();
+                                btn.click(); 
+                                return 'ok'; 
+                            }
+                        } catch(e) {}
                     }
-                }
-                return 'not_found';
-            }");
+                    return 'not_found';
+                }");
+                
+                if (menuResult == "ok") break;
+                await Task.Delay(500);
+            }
             
             if (menuResult != "ok")
             {
                 Log("메뉴 버튼을 찾을 수 없습니다. 폴백: 새 채팅으로 이동...");
-                // 폴백: 현재 채팅을 삭제하지 않고 새 채팅으로 이동
                 await StartNewChatAsync();
-                return true; // 새 채팅으로 대체
+                return true;
             }
             
             await Task.Delay(800); // 메뉴 애니메이션 대기
             
-            // 2. 삭제 메뉴 항목 클릭
-            var deleteResult = await _page.EvaluateFunctionAsync<string>(@"() => {
-                const items = document.querySelectorAll('[role=""menuitem""], button.mat-mdc-menu-item, .mat-mdc-menu-item');
-                for (const item of items) {
-                    const text = item.textContent || '';
-                    if (text.includes('삭제') || text.includes('Delete') || text.toLowerCase().includes('delete')) {
-                        item.click();
-                        return 'ok';
+            // 2. 삭제 메뉴 항목 클릭 (재시도 + 확장된 선택자)
+            string deleteResult = "not_found";
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                deleteResult = await _page!.EvaluateFunctionAsync<string>(@"() => {
+                    // 메뉴 아이템 검색 (다양한 구조 대응)
+                    const containers = [
+                        '.mat-mdc-menu-panel',
+                        '.cdk-overlay-pane',
+                        '[role=""menu""]',
+                        'mat-menu',
+                        document.body // 최후의 폴백
+                    ];
+                    
+                    for (const container of containers) {
+                        const root = typeof container === 'string' ? document.querySelector(container) : container;
+                        if (!root) continue;
+                        
+                        const items = root.querySelectorAll('[role=""menuitem""], button.mat-mdc-menu-item, .mat-mdc-menu-item, .mdc-list-item');
+                        for (const item of items) {
+                            const text = (item.textContent || '').toLowerCase();
+                            // 삭제 관련 키워드 매칭
+                            if (text.includes('삭제') || text.includes('delete') || text.includes('remove')) {
+                                // offsetParent 체크로 보이는 것만
+                                if (item.offsetParent !== null || getComputedStyle(item).display !== 'none') {
+                                    item.click();
+                                    return 'ok';
+                                }
+                            }
+                        }
                     }
-                }
-                return 'not_found';
-            }");
+                    return 'not_found';
+                }");
+                
+                if (deleteResult == "ok") break;
+                await Task.Delay(300);
+            }
             
             if (deleteResult != "ok")
             {
-                await _page.Keyboard.PressAsync("Escape");
+                await _page!.Keyboard.PressAsync("Escape");
                 Log("삭제 메뉴 항목을 찾을 수 없습니다. 폴백: 새 채팅으로 이동...");
                 await StartNewChatAsync();
                 return true;
             }
             
-            await Task.Delay(1500); // 다이얼로그 나타나기 대기 (시간 증가)
+            await Task.Delay(1500); // 다이얼로그 나타나기 대기
             
-            // 3. 삭제 확인 다이얼로그 (확장된 선택자)
-            var confirmResult = await _page.EvaluateFunctionAsync<string>(@"() => {
-                const selectors = [
-                    'mat-dialog-actions button',
-                    '.mat-dialog-actions button',
-                    '.mat-mdc-dialog-actions button',
-                    'button.mat-mdc-button',
-                    '[role=""dialog""] button',
-                    '.cdk-overlay-container button'
-                ];
-                
-                for (const containerSel of selectors) {
-                    const buttons = document.querySelectorAll(containerSel);
-                    for (const btn of buttons) {
-                        const text = btn.textContent || '';
-                        if (text.includes('삭제') || text.includes('Delete') || text.toLowerCase().includes('delete')) {
-                            btn.click();
-                            return 'ok';
+            // 3. 삭제 확인 다이얼로그 (강화된 로직)
+            string confirmResult = "not_found";
+            for (int attempt = 0; attempt < 5; attempt++) // 다이얼로그는 더 많이 재시도
+            {
+                confirmResult = await _page!.EvaluateFunctionAsync<string>(@"() => {
+                    // 다이얼로그 컨테이너 찾기
+                    const dialogContainers = [
+                        '.cdk-overlay-container',
+                        '[role=""dialog""]',
+                        'mat-dialog-container',
+                        '.mat-mdc-dialog-container',
+                        '.mdc-dialog',
+                        'dialog'
+                    ];
+                    
+                    for (const containerSel of dialogContainers) {
+                        const container = document.querySelector(containerSel);
+                        if (!container) continue;
+                        
+                        // 모든 버튼 검색
+                        const buttons = container.querySelectorAll('button, [role=""button""]');
+                        for (const btn of buttons) {
+                            const text = (btn.textContent || '').toLowerCase().trim();
+                            const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+                            
+                            // 삭제 확인 버튼 식별 (취소 버튼 제외)
+                            const isDeleteBtn = (text.includes('삭제') || text.includes('delete') || text.includes('confirm')) 
+                                              && !text.includes('취소') && !text.includes('cancel');
+                            const isDeleteAria = ariaLabel.includes('삭제') || ariaLabel.includes('delete');
+                            
+                            if ((isDeleteBtn || isDeleteAria) && btn.offsetParent !== null) {
+                                btn.focus();
+                                btn.click();
+                                return 'ok';
+                            }
                         }
                     }
-                }
-                return 'not_found';
-            }");
+                    return 'not_found';
+                }");
+                
+                if (confirmResult == "ok") break;
+                await Task.Delay(400);
+            }
             
             if (confirmResult == "ok")
             {
@@ -1174,17 +1364,16 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
             }
             
             // 다이얼로그 닫기 시도
-            await _page.Keyboard.PressAsync("Escape");
+            await _page!.Keyboard.PressAsync("Escape");
             await Task.Delay(500);
             
             Log("삭제 확인 실패. 폴백: 새 채팅으로 이동...");
             await StartNewChatAsync();
-            return true; // 새 채팅으로 대체
+            return true;
         }
         catch (Exception ex)
         {
             Log($"채팅 삭제 실패: {ex.Message}");
-            // 폴백 시도
             try
             {
                 Log("폴백: 새 채팅으로 이동 시도...");
@@ -1536,7 +1725,7 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
                 // 연속 업로드 실패 2회 시 페이지 새로고침 (JavaScript 상태 초기화)
                 if (consecutiveUploadFailures >= 2)
                 {
-                    Log("⚠️ 연속 업로드 실패 감지 - 페이지 상태 초기화...");
+                    Log("[경고] 연속 업로드 실패 감지 - 페이지 상태 초기화...");
                     await ResetPageStateAsync();
                     consecutiveUploadFailures = 0;
                     await Task.Delay(2000);
@@ -1577,14 +1766,14 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
                 // ============================================================
                 if (!await IsImageAttachedAsync())
                 {
-                    Log("⚠️ 업로드 후 이미지 첨부 확인 실패 - 재시도 필요");
+                    Log("[경고] 업로드 후 이미지 첨부 확인 실패 - 재시도 필요");
                     consecutiveUploadFailures++;
                     continue;
                 }
                 
                 // 업로드 성공 - 연속 실패 카운터 초기화
                 consecutiveUploadFailures = 0;
-                Log("✓ 이미지 첨부 확인됨");
+                Log("[성공] 이미지 첨부 확인됨");
                 
                 // 프롬프트 선택: 1-2회차는 전체 프롬프트, 3회차는 단순 프롬프트
                 string currentPrompt = attempt <= 2 ? fullPrompt : simplePrompt;

@@ -149,7 +149,7 @@ namespace GeminiWebTranslator
                     OnLog?.Invoke($"[TSV] 배치 {b + 1}/{totalBatches} 완료 ({successCount}/{batch.Count})");
                     
                     var recent = state.Results.TakeLast(5).Select(kv => $"{kv.Key}: {kv.Value}");
-                    OnPartialResult?.Invoke($"📊 진행: {state.Results.Count}/{state.ItemsToTranslate.Count} ({(int)((b+1)/(double)totalBatches*100)}%)\n✅ 완료: {state.Results.Count}\n\n--- 최근 ---\n{string.Join("\n", recent)}");
+                    OnPartialResult?.Invoke($"📊 진행: {state.Results.Count}/{state.ItemsToTranslate.Count} ({(int)((b+1)/(double)totalBatches*100)}%)\n[성공] 완료: {state.Results.Count}\n\n--- 최근 ---\n{string.Join("\n", recent)}");
                 }
                 catch (Exception ex)
                 {

@@ -26,31 +26,83 @@ jobs:
     - name: Restore dependencies
       run: dotnet restore
 
+    - name: Download OCR DLLs from MORT_VERSION
+      run: |
+        Write-Host "Downloading OCR files from MORT_VERSION..."
+        $ocrUrl = "https://github.com/killkimno/MORT_VERSION/releases/download/oneocr/oneocr.zip"
+        $ocrZip = "./oneocr.zip"
+        $ocrFolder = "./Resources/OCR"
+        
+        # OCR 폴더 생성
+        New-Item -ItemType Directory -Path $ocrFolder -Force
+        
+        # oneocr.zip 다운로드
+        Invoke-WebRequest -Uri $ocrUrl -OutFile $ocrZip -UseBasicParsing
+        Write-Host "Downloaded oneocr.zip: $((Get-Item $ocrZip).Length / 1MB) MB"
+        
+        # 압축 해제
+        Expand-Archive -Path $ocrZip -DestinationPath "./oneocr_temp" -Force
+        
+        # 필요한 파일만 복사 (oneocr.dll, oneocr.onemodel, onnxruntime.dll)
+        $files = @("oneocr.dll", "oneocr.onemodel", "onnxruntime.dll")
+        foreach ($file in $files) {
+          $source = Get-ChildItem -Path "./oneocr_temp" -Filter $file -Recurse | Select-Object -First 1
+          if ($source) {
+            Copy-Item $source.FullName -Destination "$ocrFolder/$file"
+            Write-Host "Copied: $file"
+          } else {
+            Write-Host "Warning: $file not found in oneocr.zip"
+          }
+        }
+        
+        # 정리
+        Remove-Item $ocrZip -Force
+        Remove-Item "./oneocr_temp" -Recurse -Force
+        
+        # 결과 확인
+        Write-Host "OCR folder contents:"
+        Get-ChildItem -Path $ocrFolder | ForEach-Object { Write-Host "  $($_.Name) - $($_.Length) bytes" }
+
     - name: Publish Standalone EXE
       run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o ./publish
 
-    - name: Rename EXE
+    - name: Verify Build Output
       run: |
+        Write-Host "Published files:"
+        Get-ChildItem -Path ./publish -Recurse | ForEach-Object { Write-Host "$($_.FullName) - $($_.Length) bytes" }
+        
+        # EXE 파일 확인
         $exeFile = Get-ChildItem -Path ./publish -Filter *.exe | Select-Object -First 1
         if ($exeFile) {
-          Copy-Item $exeFile.FullName -Destination ./GeminiWebTranslator.exe
+          Write-Host "Main EXE: $($exeFile.Name) ($([math]::Round($exeFile.Length / 1MB, 2)) MB)"
         }
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: GeminiWebTranslator_Windows
-        path: ./GeminiWebTranslator.exe
+        path: |
+          ./publish/GeminiWebTranslator_Net8.exe
+          ./publish/Resources/OCR/
 
   release:
     needs: build
     runs-on: ubuntu-latest
     
     steps:
-    - name: Download Windows Artifact
+    - name: Download Artifact
       uses: actions/download-artifact@v4
       with:
         name: GeminiWebTranslator_Windows
+        path: ./release
+
+    - name: Prepare Release Files
+      run: |
+        # EXE 이름 변경
+        mv ./release/GeminiWebTranslator_Net8.exe ./release/GeminiWebTranslator.exe
+        
+        echo "Release contents:"
+        find ./release -type f -exec ls -la {} \;
 
     - name: Generate Version
       id: version
@@ -67,12 +119,20 @@ jobs:
         tag_name: ${{ steps.version.outputs.VERSION }}
         name: Release ${{ steps.version.outputs.VERSION }}
         body: |
-          ## 자동 릴리즈
-          - **Windows**: GeminiWebTranslator.exe (단일 실행 파일)
+          ## GeminiWebTranslator 릴리즈
+          
+          ### 다운로드
+          - **GeminiWebTranslator.exe** - 단일 실행 파일 (OCR 포함)
+          
+          ### 사용법
+          1. `GeminiWebTranslator.exe`를 다운로드합니다
+          2. 프로그램을 실행합니다
+          
+          > OCR 기능이 빌드에 포함되어 있습니다.
           
           커밋: ${{ github.sha }}
         files: |
-          GeminiWebTranslator.exe
+          ./release/GeminiWebTranslator.exe
         draft: false
         prerelease: false
       env:

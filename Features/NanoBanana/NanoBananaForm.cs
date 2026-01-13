@@ -206,7 +206,7 @@ public class NanoBananaForm : Form
             
             // 업로드 메뉴 (수동 선택 필요)
             await _processor.OpenUploadMenuAsync();
-            AppendLog("⚠️ 파일 다이얼로그에서 이미지를 선택하세요");
+            AppendLog("[경고] 파일 다이얼로그에서 이미지를 선택하세요");
             
             // 대기
             await Task.Delay(5000);
@@ -218,11 +218,11 @@ public class NanoBananaForm : Form
             await _processor.WaitForResponseAsync();
             
             btnDownload.Enabled = true;
-            AppendLog("✅ 완료! [다운로드] 버튼을 클릭하세요");
+            AppendLog("[성공] 완료! [다운로드] 버튼을 클릭하세요");
         }
         catch (Exception ex)
         {
-            AppendLog($"❌ 오류: {ex.Message}");
+            AppendLog($"[실패] 오류: {ex.Message}");
         }
         finally
         {

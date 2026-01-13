@@ -66,7 +66,7 @@ public partial class MainForm
         { 
             translationContext.RecordError(); 
             txtOutput.Text += $"\n\n오류: {ex.Message}"; 
-            UpdateStatus("❌ 오류", Color.Red); 
+            UpdateStatus("[실패] 오류", Color.Red); 
         }
         finally 
         { 
@@ -349,7 +349,7 @@ public partial class MainForm
         { 
             translationContext.RecordError(); 
             txtOutput.Text += $"\n\n오류: {ex.Message}"; 
-            UpdateStatus("❌ 오류", Color.Red); 
+            UpdateStatus("[실패] 오류", Color.Red); 
         }
         finally 
         { 

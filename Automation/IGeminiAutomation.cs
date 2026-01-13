@@ -122,4 +122,10 @@ public class WebViewDiagnostics
     public bool IsGenerating { get; set; }
     public bool IsLoggedIn { get; set; }
     public string ErrorMessage { get; set; } = "";
+    
+    // 이미지 기능 관련 진단 필드
+    /// <summary>이미지 업로드/생성 기능 사용 가능 여부</summary>
+    public bool ImageCapabilityAvailable { get; set; } = true;
+    /// <summary>이미지 관련 오류 메시지</summary>
+    public string ImageErrorMessage { get; set; } = "";
 }

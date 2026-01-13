@@ -63,7 +63,7 @@ public class BrowserSettingsForm : Form
     public BrowserSettingsForm()
     {
         InitializeComponent();
-        ApplyTheme();
+        UiTheme.ApplyTheme(this);
         UpdateStatus();
         
         // MainForm의 항상 위 설정 상속
@@ -73,184 +73,85 @@ public class BrowserSettingsForm : Form
     private void InitializeComponent()
     {
         this.Text = "🌐 브라우저 모드 설정";
-        this.Size = new Size(520, 780); // Increased for model selection
-        this.StartPosition = FormStartPosition.CenterScreen; // Changed to CenterScreen
-        this.FormBorderStyle = FormBorderStyle.FixedDialog;
-        this.MaximizeBox = false;
-        this.MinimizeBox = false;
+        this.Size = new Size(520, 780);
+        this.StartPosition = FormStartPosition.CenterScreen;
+        this.FormBorderStyle = FormBorderStyle.Sizable;
+        this.MinimumSize = new Size(400, 600);
         
-        int y = 20;
-        int padding = 10;
+        // == Main Layout ==
+        var mainPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
         
-        // == 브라우저 제어 그룹 ==
-        grpBrowserControl = new GroupBox
+        // == 로그 (Fill) ==
+        txtLog = new TextBox
         {
-            Text = "브라우저 제어",
-            Location = new Point(15, y),
-            Size = new Size(475, 120), // Increased width/height
-            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
+            Dock = DockStyle.Fill,
+            Multiline = true,
+            ScrollBars = ScrollBars.Vertical,
+            ReadOnly = true,
+            Font = new Font("Consolas", 9.5F),
+            BackColor = UiTheme.ColorBackground,
+            ForeColor = UiTheme.ColorText
         };
+        mainPanel.Controls.Add(txtLog);
         
-        btnLaunchBrowser = new Button { Text = "🚀 브라우저 실행", Location = new Point(15, 30), Size = new Size(135, 38), Font = new Font("Segoe UI", 9f) };
-        btnCloseBrowser = new Button { Text = "❌ 브라우저 종료", Location = new Point(165, 30), Size = new Size(135, 38), Font = new Font("Segoe UI", 9f) };
-        btnNavigateGemini = new Button { Text = "🏠 Gemini 이동", Location = new Point(315, 30), Size = new Size(135, 38), Font = new Font("Segoe UI", 9f) };
-        
-        btnShowBrowser = new Button { Text = "👁 브라우저 표시", Location = new Point(15, 75), Size = new Size(135, 38), Font = new Font("Segoe UI", 9f) };
-        btnHideBrowser = new Button { Text = "🔽 브라우저 숨기기", Location = new Point(165, 75), Size = new Size(135, 38), Font = new Font("Segoe UI", 9f) };
-        
+        // == 상태 그룹 (Top) ==
+        grpStatus = new GroupBox { Text = "연결 상태", Dock = DockStyle.Top, Height = 90, Padding = new Padding(10) };
+        var statusFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        lblStatusTitle = new Label { Text = "상태:", AutoSize = true };
+        lblStatus = new Label { Text = "연결되지 않음", AutoSize = true, Font = new Font("Segoe UI", 9f, FontStyle.Bold), ForeColor = UiTheme.ColorWarning };
+        lblUrlTitle = new Label { Text = "URL:", AutoSize = true };
+        lblUrl = new Label { Text = "-", AutoSize = true, AutoEllipsis = true };
+        statusFlow.Controls.AddRange(new Control[] { lblStatusTitle, lblStatus, lblUrlTitle, lblUrl });
+        grpStatus.Controls.Add(statusFlow);
+        mainPanel.Controls.Add(grpStatus);
+
+        // == 모델 선택 그룹 (Top) ==
+        grpModelSelection = new GroupBox { Text = "Gemini 모델 선택", Dock = DockStyle.Top, Height = 80, Padding = new Padding(10) };
+        var modelFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+        btnModelFlash = new Button { Text = "⚡ Flash", Size = new Size(130, 40), Margin = new Padding(3), BackColor = UiTheme.ColorSurfaceLight, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        btnModelPro = new Button { Text = "🔥 Pro", Size = new Size(130, 40), Margin = new Padding(3), BackColor = UiTheme.ColorSurfaceLight, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        lblCurrentModel = new Label { Text = "현재: -", AutoSize = true, Margin = new Padding(10, 15, 0, 0), ForeColor = UiTheme.ColorSuccess };
+        btnModelFlash.Click += BtnModelFlash_Click;
+        btnModelPro.Click += BtnModelPro_Click;
+        modelFlow.Controls.AddRange(new Control[] { btnModelFlash, btnModelPro, lblCurrentModel });
+        grpModelSelection.Controls.Add(modelFlow);
+        mainPanel.Controls.Add(grpModelSelection);
+
+        // == 창 크기 그룹 (Top) ==
+        grpWindowSize = new GroupBox { Text = "창 크기 조절", Dock = DockStyle.Top, Height = 80, Padding = new Padding(10) };
+        var sizeFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+        btnSizeSmall = new Button { Text = "작게", Size = new Size(100, 45), Margin = new Padding(3), BackColor = UiTheme.ColorSurfaceLight, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        btnSizeMedium = new Button { Text = "중간", Size = new Size(100, 45), Margin = new Padding(3), BackColor = UiTheme.ColorSurfaceLight, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        btnSizeLarge = new Button { Text = "크게", Size = new Size(100, 45), Margin = new Padding(3), BackColor = UiTheme.ColorSurfaceLight, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        btnSizeFullScreen = new Button { Text = "전체화면", Size = new Size(100, 45), Margin = new Padding(3), BackColor = UiTheme.ColorSurfaceLight, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        btnSizeSmall.Click += async (s, e) => await ResizeBrowserAsync(800, 600);
+        btnSizeMedium.Click += async (s, e) => await ResizeBrowserAsync(1200, 800);
+        btnSizeLarge.Click += async (s, e) => await ResizeBrowserAsync(1400, 900);
+        btnSizeFullScreen.Click += async (s, e) => await SetWindowStateAsync("maximized");
+        sizeFlow.Controls.AddRange(new Control[] { btnSizeSmall, btnSizeMedium, btnSizeLarge, btnSizeFullScreen });
+        grpWindowSize.Controls.Add(sizeFlow);
+        mainPanel.Controls.Add(grpWindowSize);
+
+        // == 브라우저 제어 그룹 (Top) ==
+        grpBrowserControl = new GroupBox { Text = "브라우저 제어", Dock = DockStyle.Top, Height = 120, Padding = new Padding(10) };
+        var flowBrowser = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = true };
+        btnLaunchBrowser = new Button { Text = "🚀 브라우저 실행", Size = new Size(140, 40), Margin = new Padding(3), BackColor = UiTheme.ColorSuccess, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        btnCloseBrowser = new Button { Text = "[종료] 종료", Size = new Size(140, 40), Margin = new Padding(3), BackColor = UiTheme.ColorError, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        btnNavigateGemini = new Button { Text = "🏠 Gemini 이동", Size = new Size(140, 40), Margin = new Padding(3), BackColor = UiTheme.ColorPrimary, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        btnShowBrowser = new Button { Text = "👁 표시", Size = new Size(100, 40), Margin = new Padding(3), BackColor = UiTheme.ColorSurfaceLight, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        btnHideBrowser = new Button { Text = "🔽 숨기기", Size = new Size(100, 40), Margin = new Padding(3), BackColor = UiTheme.ColorSurfaceLight, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
         btnLaunchBrowser.Click += BtnLaunchBrowser_Click;
         btnCloseBrowser.Click += BtnCloseBrowser_Click;
         btnNavigateGemini.Click += BtnNavigateGemini_Click;
         btnShowBrowser.Click += BtnShowBrowser_Click;
         btnHideBrowser.Click += BtnHideBrowser_Click;
-        
-        grpBrowserControl.Controls.AddRange(new Control[] { btnLaunchBrowser, btnCloseBrowser, btnNavigateGemini, btnShowBrowser, btnHideBrowser });
-        this.Controls.Add(grpBrowserControl);
-        
-        y += 135; // Adjusted gap
-        
-        // == 창 크기 그룹 ==
-        grpWindowSize = new GroupBox
-        {
-            Text = "창 크기 조절",
-            Location = new Point(15, y),
-            Size = new Size(475, 80),
-            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
-        };
-        
-        btnSizeSmall = new Button { Text = "작게\n(800x600)", Location = new Point(15, 25), Size = new Size(100, 45), Font = new Font("Segoe UI", 8.5f) };
-        btnSizeMedium = new Button { Text = "중간\n(1200x800)", Location = new Point(125, 25), Size = new Size(100, 45), Font = new Font("Segoe UI", 8.5f) };
-        btnSizeLarge = new Button { Text = "크게\n(1400x900)", Location = new Point(235, 25), Size = new Size(100, 45), Font = new Font("Segoe UI", 8.5f) };
-        btnSizeFullScreen = new Button { Text = "전체화면\n(Max)", Location = new Point(345, 25), Size = new Size(100, 45), Font = new Font("Segoe UI", 8.5f) };
-        
-        btnSizeSmall.Click += async (s, e) => await ResizeBrowserAsync(800, 600);
-        btnSizeMedium.Click += async (s, e) => await ResizeBrowserAsync(1200, 800);
-        btnSizeLarge.Click += async (s, e) => await ResizeBrowserAsync(1400, 900);
-        btnSizeFullScreen.Click += async (s, e) => await SetWindowStateAsync("maximized");
-        
-        grpWindowSize.Controls.AddRange(new Control[] { btnSizeSmall, btnSizeMedium, btnSizeLarge, btnSizeFullScreen });
-        this.Controls.Add(grpWindowSize);
-        
-        y += 95;
-        
-        // == 모델 선택 그룹 ==
-        grpModelSelection = new GroupBox
-        {
-            Text = "Gemini 모델 선택",
-            Location = new Point(15, y),
-            Size = new Size(475, 75),
-            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
-        };
-        
-        btnModelFlash = new Button { Text = "⚡ Flash", Location = new Point(15, 28), Size = new Size(130, 38), Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
-        btnModelPro = new Button { Text = "🔥 Pro", Location = new Point(160, 28), Size = new Size(130, 38), Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
-        lblCurrentModel = new Label { Text = "현재: -", Location = new Point(310, 35), Size = new Size(150, 25), Font = new Font("Segoe UI", 9f), ForeColor = Color.LightGreen };
-        
-        btnModelFlash.Click += BtnModelFlash_Click;
-        btnModelPro.Click += BtnModelPro_Click;
-        
-        grpModelSelection.Controls.AddRange(new Control[] { btnModelFlash, btnModelPro, lblCurrentModel });
-        this.Controls.Add(grpModelSelection);
-        
-        y += 90;
-        
-        // == 상태 그룹 ==
-        grpStatus = new GroupBox
-        {
-            Text = "연결 상태",
-            Location = new Point(15, y),
-            Size = new Size(475, 90),
-            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
-        };
-        
-        lblStatusTitle = new Label { Text = "상태:", Location = new Point(15, 30), Size = new Size(50, 20), Font = new Font("Segoe UI", 9f) };
-        lblStatus = new Label { Text = "연결되지 않음", Location = new Point(70, 30), Size = new Size(380, 20), Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
-        lblUrlTitle = new Label { Text = "URL:", Location = new Point(15, 60), Size = new Size(50, 20), Font = new Font("Segoe UI", 9f) };
-        lblUrl = new Label { Text = "-", Location = new Point(70, 60), Size = new Size(380, 20), AutoEllipsis = true, Font = new Font("Segoe UI", 9f) };
-        
-        grpStatus.Controls.AddRange(new Control[] { lblStatusTitle, lblStatus, lblUrlTitle, lblUrl });
-        this.Controls.Add(grpStatus);
-        
-        y += 105;
-        
-        // == 로그 ==
-        var lblLog = new Label { Text = "로그:", Location = new Point(15, y), AutoSize = true, Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
-        this.Controls.Add(lblLog);
-        
-        y += 25;
-        
-        txtLog = new TextBox
-        {
-            Location = new Point(15, y),
-            Size = new Size(475, 200),
-            Multiline = true,
-            ScrollBars = ScrollBars.Vertical,
-            ReadOnly = true,
-            Font = new Font("Consolas", 9.5F), // Increased font size for readability
-            BackColor = Color.FromArgb(25, 25, 30),
-            ForeColor = Color.LightGray
-        };
-        this.Controls.Add(txtLog);
+        flowBrowser.Controls.AddRange(new Control[] { btnLaunchBrowser, btnCloseBrowser, btnNavigateGemini, btnShowBrowser, btnHideBrowser });
+        grpBrowserControl.Controls.Add(flowBrowser);
+        mainPanel.Controls.Add(grpBrowserControl);
+
+        this.Controls.Add(mainPanel);
     }
-    
-    private void ApplyTheme()
-    {
-        var deepCharcoal = Color.FromArgb(20, 20, 25);
-        var surfaceDark = Color.FromArgb(30, 30, 35);
-        var accentPurple = Color.FromArgb(124, 77, 255);
-        var softWhite = Color.FromArgb(224, 224, 224);
-        
-        this.BackColor = deepCharcoal;
-        this.ForeColor = softWhite;
-        
-        foreach (Control c in this.Controls)
-        {
-            if (c is GroupBox grp)
-            {
-                grp.ForeColor = accentPurple;
-                grp.BackColor = surfaceDark;
-            }
-            else if (c is Button btn)
-            {
-                btn.BackColor = Color.FromArgb(45, 45, 50);
-                btn.ForeColor = softWhite;
-                btn.FlatStyle = FlatStyle.Flat;
-                btn.FlatAppearance.BorderColor = Color.FromArgb(60, 60, 65);
-                btn.Cursor = Cursors.Hand;
-            }
-            else if (c is TextBox txt)
-            {
-                txt.BackColor = Color.FromArgb(25, 25, 30);
-                txt.ForeColor = softWhite;
-            }
-            else if (c is Label lbl)
-            {
-                lbl.ForeColor = softWhite;
-            }
-            
-            // 하위 컨트롤
-            foreach (Control child in c.Controls)
-            {
-                if (child is Button btn)
-                {
-                    btn.BackColor = Color.FromArgb(45, 45, 50);
-                    btn.ForeColor = softWhite;
-                    btn.FlatStyle = FlatStyle.Flat;
-                    btn.FlatAppearance.BorderColor = Color.FromArgb(60, 60, 65);
-                    btn.Cursor = Cursors.Hand;
-                }
-                else if (child is Label lbl)
-                {
-                    lbl.ForeColor = softWhite;
-                }
-            }
-        }
-        
-        // 특수 버튼 색상
-        btnLaunchBrowser.BackColor = Color.FromArgb(46, 160, 67);
-        btnCloseBrowser.BackColor = Color.FromArgb(180, 70, 70);
-        btnShowBrowser.BackColor = Color.FromArgb(124, 77, 255);
-    }
+    // ApplyTheme 메서드는 제거되었습니다. UiTheme.ApplyDarkTheme(this)가 대신 사용됩니다.
     
     #region Browser Control
     
@@ -283,7 +184,7 @@ public class BrowserSettingsForm : Form
                 
                 if (await _automation.ConnectWithBrowserAsync(browser))
                 {
-                    AppendLog("✅ 브라우저 연결 성공!");
+                    AppendLog("[성공] 브라우저 연결 성공!");
                     OnBrowserModeChanged?.Invoke(true);
                 }
             }
@@ -365,13 +266,13 @@ public class BrowserSettingsForm : Form
             {
                 lblCurrentModel.Text = "현재: ⚡ Flash";
                 lblCurrentModel.ForeColor = Color.Cyan;
-                btnModelFlash.BackColor = Color.FromArgb(0, 150, 200);
-                btnModelPro.BackColor = Color.FromArgb(60, 60, 70);
-                AppendLog("✅ Flash 모델로 전환 완료!");
+                btnModelFlash.BackColor = UiTheme.ColorPrimary;
+                btnModelPro.BackColor = UiTheme.ColorSurfaceLight;
+                AppendLog("[성공] Flash 모델로 전환 완료!");
             }
             else
             {
-                AppendLog("❌ Flash 모델 전환 실패");
+                AppendLog("[실패] Flash 모델 전환 실패");
             }
         }
         catch (Exception ex)
@@ -405,13 +306,13 @@ public class BrowserSettingsForm : Form
             {
                 lblCurrentModel.Text = "현재: 🔥 Pro";
                 lblCurrentModel.ForeColor = Color.Orange;
-                btnModelPro.BackColor = Color.FromArgb(255, 140, 0);
-                btnModelFlash.BackColor = Color.FromArgb(60, 60, 70);
-                AppendLog("✅ Pro 모델로 전환 완료!");
+                btnModelPro.BackColor = UiTheme.ColorWarning;
+                btnModelFlash.BackColor = UiTheme.ColorSurfaceLight;
+                AppendLog("[성공] Pro 모델로 전환 완료!");
             }
             else
             {
-                AppendLog("❌ Pro 모델 전환 실패");
+                AppendLog("[실패] Pro 모델 전환 실패");
             }
         }
         catch (Exception ex)
@@ -525,8 +426,8 @@ public class BrowserSettingsForm : Form
         var browser = GlobalBrowserState.Instance.ActiveBrowser;
         if (browser != null && !browser.IsClosed)
         {
-            lblStatus.Text = "✅ 연결됨";
-            lblStatus.ForeColor = Color.LightGreen;
+            lblStatus.Text = "[성공] 연결됨";
+            lblStatus.ForeColor = UiTheme.ColorSuccess;
             
             _ = Task.Run(async () =>
             {
@@ -544,8 +445,8 @@ public class BrowserSettingsForm : Form
         }
         else
         {
-            lblStatus.Text = "❌ 연결되지 않음";
-            lblStatus.ForeColor = Color.FromArgb(180, 70, 70);
+            lblStatus.Text = "[실패] 연결되지 않음";
+            lblStatus.ForeColor = UiTheme.ColorError;
             lblUrl.Text = "-";
         }
     }

@@ -11,8 +11,6 @@
 *.user
 *.userosscache
 *.sln.docstates
-*.dll
-*.exe
 *.pdb
 *.orig
 
@@ -25,6 +23,11 @@
 /TopSecretProfile/
 /gemini_cookies.json
 /chrome_download.zip
+
+# OCR DLLs - 자동 추출되므로 Git에 포함하지 않음
+# (Windows ScreenSketch 또는 Photos 앱에서 자동 추출)
+Resources/OCR/*.dll
+Resources/OCR/*.onemodel
 
 # Others
 *.log

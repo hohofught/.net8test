@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Newtonsoft.Json;
+using GeminiWebTranslator.Services;
 
 namespace GeminiWebTranslator.Forms
 {
@@ -69,7 +70,7 @@ namespace GeminiWebTranslator.Forms
             this.Text = "🎨 프롬프트 커스터마이저 - 번역 설정";
             this.Size = new Size(1200, 800);
             this.StartPosition = FormStartPosition.CenterParent;
-            this.BackColor = Color.FromArgb(25, 25, 30);
+            this.BackColor = UiTheme.ColorBackground;
             this.Font = new Font("Segoe UI", 9);
             this.KeyPreview = true;
             this.KeyDown += Form_KeyDown;
@@ -78,15 +79,15 @@ namespace GeminiWebTranslator.Forms
                 Dock = DockStyle.Fill, 
                 Orientation = Orientation.Vertical, 
                 SplitterDistance = 500,
-                BackColor = Color.FromArgb(35, 35, 40),
+                BackColor = UiTheme.ColorSurface,
                 SplitterWidth = 6
             };
             
             // ========== Left Panel - Preview ==========
-            var pnlLeft = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12), BackColor = Color.FromArgb(25, 25, 30) };
+            var pnlLeft = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12), BackColor = UiTheme.ColorBackground };
             
             // Header with search
-            var pnlLeftHeader = new Panel { Dock = DockStyle.Top, Height = 70, BackColor = Color.FromArgb(25, 25, 30) };
+            var pnlLeftHeader = new Panel { Dock = DockStyle.Top, Height = 70, BackColor = UiTheme.ColorBackground };
             var lblPreview = new Label { 
                 Text = "📄 파일 미리보기", 
                 Location = new Point(0, 0), Height = 25, 
@@ -111,21 +112,21 @@ namespace GeminiWebTranslator.Forms
             pnlLeftHeader.Controls.AddRange(new Control[] { lblPreview, txtSearch, lblLineCount });
             
             // Selection buttons
-            var pnlSelectionButtons = new Panel { Dock = DockStyle.Bottom, Height = 40, BackColor = Color.FromArgb(25, 25, 30) };
+            var pnlSelectionButtons = new Panel { Dock = DockStyle.Bottom, Height = 40, BackColor = UiTheme.ColorBackground };
             
-            var btnSelectAll = CreateStyledButton("전체 선택", Color.FromArgb(55, 55, 65));
+            var btnSelectAll = CreateStyledButton("전체 선택", UiTheme.ColorSurfaceLight);
             btnSelectAll.Location = new Point(0, 5);
             btnSelectAll.Click += (s, e) => SelectAllLines(true);
             
-            var btnSelectNone = CreateStyledButton("전체 해제", Color.FromArgb(55, 55, 65));
+            var btnSelectNone = CreateStyledButton("전체 해제", UiTheme.ColorSurfaceLight);
             btnSelectNone.Location = new Point(95, 5);
             btnSelectNone.Click += (s, e) => SelectAllLines(false);
             
-            var btnSelectFirst10 = CreateStyledButton("처음 10줄", Color.FromArgb(55, 55, 65));
+            var btnSelectFirst10 = CreateStyledButton("처음 10줄", UiTheme.ColorSurfaceLight);
             btnSelectFirst10.Location = new Point(190, 5);
             btnSelectFirst10.Click += (s, e) => SelectFirstN(10);
             
-            var btnSelectFirst50 = CreateStyledButton("처음 50줄", Color.FromArgb(55, 55, 65));
+            var btnSelectFirst50 = CreateStyledButton("처음 50줄", UiTheme.ColorSurfaceLight);
             btnSelectFirst50.Location = new Point(285, 5);
             btnSelectFirst50.Click += (s, e) => SelectFirstN(50);
             
@@ -135,8 +136,8 @@ namespace GeminiWebTranslator.Forms
             lstPreview = new ListBox { 
                 Dock = DockStyle.Fill, 
                 SelectionMode = SelectionMode.MultiExtended,
-                BackColor = Color.FromArgb(35, 35, 40),
-                ForeColor = Color.FromArgb(220, 220, 225),
+                BackColor = UiTheme.ColorSurface,
+                ForeColor = UiTheme.ColorText,
                 BorderStyle = BorderStyle.None,
                 Font = new Font("Consolas", 9.5f),
                 IntegralHeight = false
@@ -151,7 +152,7 @@ namespace GeminiWebTranslator.Forms
             pnlLeft.Controls.Add(pnlLeftHeader);
 
             // ========== Right Panel - Prompt Configuration ==========
-            var pnlRight = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12), BackColor = Color.FromArgb(25, 25, 30) };
+            var pnlRight = new Panel { Dock = DockStyle.Fill, Padding = new Padding(12), BackColor = UiTheme.ColorBackground };
             
             // Header
             var lblPrompt = new Label { 
@@ -172,13 +173,13 @@ namespace GeminiWebTranslator.Forms
             };
 
             // ===== Presets Panel =====
-            var pnlPresets = new Panel { Dock = DockStyle.Top, Height = 40, BackColor = Color.FromArgb(25, 25, 30) };
+            var pnlPresets = new Panel { Dock = DockStyle.Top, Height = 40, BackColor = UiTheme.ColorBackground };
             
             var lblPresets = new Label { Text = "프리셋:", Location = new Point(0, 10), AutoSize = true, ForeColor = Color.White };
             cboPresets = new ComboBox { 
                 Location = new Point(55, 6), Width = 180, 
                 DropDownStyle = ComboBoxStyle.DropDownList,
-                BackColor = Color.FromArgb(45, 45, 50), ForeColor = Color.White,
+                BackColor = UiTheme.ColorSurface, ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat
             };
             cboPresets.Items.Add("-- 선택 --");
@@ -186,12 +187,12 @@ namespace GeminiWebTranslator.Forms
             cboPresets.SelectedIndex = 0;
             cboPresets.SelectedIndexChanged += CboPresets_SelectedIndexChanged;
             
-            var btnSavePreset = CreateStyledButton("💾 저장", Color.FromArgb(60, 130, 180));
+            var btnSavePreset = CreateStyledButton("💾 저장", UiTheme.ColorPrimary);
             btnSavePreset.Location = new Point(245, 5);
             btnSavePreset.Width = 70;
             btnSavePreset.Click += BtnSavePreset_Click;
             
-            var btnDeletePreset = CreateStyledButton("🗑️", Color.FromArgb(180, 60, 60));
+            var btnDeletePreset = CreateStyledButton("🗑️", UiTheme.ColorError);
             btnDeletePreset.Location = new Point(320, 5);
             btnDeletePreset.Width = 40;
             btnDeletePreset.Click += BtnDeletePreset_Click;
@@ -199,13 +200,13 @@ namespace GeminiWebTranslator.Forms
             pnlPresets.Controls.AddRange(new Control[] { lblPresets, cboPresets, btnSavePreset, btnDeletePreset });
 
             // ===== Genre Templates =====
-            var pnlTemplates = new Panel { Dock = DockStyle.Top, Height = 45, BackColor = Color.FromArgb(25, 25, 30) };
+            var pnlTemplates = new Panel { Dock = DockStyle.Top, Height = 45, BackColor = UiTheme.ColorBackground };
             var lblTemplates = new Label { Text = "템플릿:", Location = new Point(0, 12), AutoSize = true, ForeColor = Color.White };
             
             int templateX = 55;
             foreach (var template in GenreTemplates)
             {
-                var btn = CreateStyledButton(template.Key, Color.FromArgb(50, 50, 60));
+                var btn = CreateStyledButton(template.Key, UiTheme.ColorSurface);
                 btn.Location = new Point(templateX, 7);
                 btn.Width = 95;
                 btn.Height = 28;
@@ -218,21 +219,21 @@ namespace GeminiWebTranslator.Forms
             pnlTemplates.Controls.Add(lblTemplates);
 
             // ===== Analysis Buttons Panel =====
-            var analysisPanel = new Panel { Dock = DockStyle.Top, Height = 50, BackColor = Color.FromArgb(25, 25, 30) };
+            var analysisPanel = new Panel { Dock = DockStyle.Top, Height = 50, BackColor = UiTheme.ColorBackground };
             
-            btnAnalyze = CreateStyledButton("⚡ 빠른 분석", Color.FromArgb(50, 140, 200));
+            btnAnalyze = CreateStyledButton("⚡ 빠른 분석", UiTheme.ColorPrimary);
             btnAnalyze.Location = new Point(0, 8);
             btnAnalyze.Width = 130;
             btnAnalyze.Height = 35;
             btnAnalyze.Click += BtnQuickAnalyze_Click;
 
-            btnDetailedAnalysis = CreateStyledButton("🔍 상세 분석", Color.FromArgb(100, 70, 170));
+            btnDetailedAnalysis = CreateStyledButton("🔍 상세 분석", UiTheme.ColorPrimary);
             btnDetailedAnalysis.Location = new Point(140, 8);
             btnDetailedAnalysis.Width = 130;
             btnDetailedAnalysis.Height = 35;
             btnDetailedAnalysis.Click += BtnDetailedAnalysis_Click;
             
-            btnPreview = CreateStyledButton("👁️ 번역 미리보기", Color.FromArgb(60, 130, 90));
+            btnPreview = CreateStyledButton("👁️ 번역 미리보기", UiTheme.ColorSuccess);
             btnPreview.Location = new Point(280, 8);
             btnPreview.Width = 140;
             btnPreview.Height = 35;
@@ -246,21 +247,21 @@ namespace GeminiWebTranslator.Forms
                 Multiline = true, 
                 ScrollBars = ScrollBars.Vertical, 
                 Font = new Font("Consolas", 10),
-                BackColor = Color.FromArgb(40, 40, 45),
-                ForeColor = Color.FromArgb(230, 230, 235),
+                BackColor = UiTheme.ColorSurface,
+                ForeColor = UiTheme.ColorText,
                 BorderStyle = BorderStyle.FixedSingle,
                 AcceptsTab = true
             };
             
             // Preview Result (Bottom)
-            var pnlPreviewResult = new Panel { Dock = DockStyle.Bottom, Height = 120, BackColor = Color.FromArgb(30, 30, 35) };
+            var pnlPreviewResult = new Panel { Dock = DockStyle.Bottom, Height = 120, BackColor = UiTheme.ColorSurface };
             var lblPreviewResult = new Label { 
                 Text = "🔄 번역 미리보기 결과", Dock = DockStyle.Top, Height = 22,
                 ForeColor = Color.Gray, Font = new Font("Segoe UI", 9)
             };
             txtPreviewResult = new TextBox {
                 Dock = DockStyle.Fill, Multiline = true, ReadOnly = true,
-                BackColor = Color.FromArgb(35, 35, 40), ForeColor = Color.FromArgb(180, 220, 180),
+                BackColor = UiTheme.ColorSurface, ForeColor = UiTheme.ColorSuccess,
                 BorderStyle = BorderStyle.None, Font = new Font("Consolas", 9.5f),
                 ScrollBars = ScrollBars.Vertical
             };
@@ -268,16 +269,16 @@ namespace GeminiWebTranslator.Forms
             pnlPreviewResult.Controls.Add(lblPreviewResult);
             
             // ===== Bottom Actions =====
-            var pnlBottomActions = new Panel { Dock = DockStyle.Bottom, Height = 55, Padding = new Padding(0, 10, 0, 0), BackColor = Color.FromArgb(20, 20, 25) };
+            var pnlBottomActions = new Panel { Dock = DockStyle.Bottom, Height = 55, Padding = new Padding(0, 10, 0, 0), BackColor = UiTheme.ColorBackground };
             
-            btnConfirm = CreateStyledButton("✅ 프롬프트 적용", Color.FromArgb(60, 180, 100));
+            btnConfirm = CreateStyledButton("[적용] 프롬프트 적용", UiTheme.ColorSuccess);
             btnConfirm.Dock = DockStyle.Right;
             btnConfirm.Width = 140;
             btnConfirm.Height = 40;
             btnConfirm.Font = new Font("Segoe UI", 10, FontStyle.Bold);
             btnConfirm.Click += (s, e) => { GeneratedPrompt = txtPrompt.Text; DialogResult = DialogResult.OK; Close(); };
             
-            btnCancel = CreateStyledButton("건너뛰기 (기본 프롬프트 사용)", Color.FromArgb(60, 60, 70));
+            btnCancel = CreateStyledButton("건너뛰기 (기본 프롬프트 사용)", UiTheme.ColorSurfaceLight);
             btnCancel.Dock = DockStyle.Left;
             btnCancel.Width = 200;
             btnCancel.Click += (s, e) => { DialogResult = DialogResult.Ignore; Close(); };
@@ -334,13 +335,13 @@ namespace GeminiWebTranslator.Forms
             if (e.Index < 0) return;
             
             var isSelected = _selectedIndices.Contains(e.Index);
-            var backColor = isSelected ? Color.FromArgb(60, 100, 140) : 
-                            (e.Index % 2 == 0 ? Color.FromArgb(35, 35, 40) : Color.FromArgb(40, 40, 45));
+            var backColor = isSelected ? UiTheme.ColorPrimary : 
+                            (e.Index % 2 == 0 ? UiTheme.ColorSurface : UiTheme.ColorSurfaceLight);
             
             e.Graphics.FillRectangle(new SolidBrush(backColor), e.Bounds);
             
             var text = lstPreview.Items[e.Index]?.ToString() ?? "";
-            var textColor = isSelected ? Color.White : Color.FromArgb(200, 200, 205);
+            var textColor = isSelected ? Color.White : UiTheme.ColorText;
             e.Graphics.DrawString(text, e.Font ?? Font, new SolidBrush(textColor), e.Bounds.X + 5, e.Bounds.Y + 3);
         }
 

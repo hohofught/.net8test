@@ -79,13 +79,79 @@ const BrowserModeAutomation = {
     // ========== 응답 관련 ==========
 
     /**
-     * 최신 응답 텍스트 추출
+     * 최신 응답 텍스트 추출 (이미지 응답 필터링 포함)
      * @returns {string}
      */
     getResponse: function () {
         const responses = document.querySelectorAll('message-content.model-response-text, .model-response-text');
         if (responses.length === 0) return '';
-        return (responses[responses.length - 1].innerText || '').trim();
+
+        const lastResponse = responses[responses.length - 1];
+
+        // 1. 마크다운 영역에서 텍스트 추출 시도
+        const markdownEl = lastResponse.querySelector('.markdown');
+        if (markdownEl) {
+            const text = markdownEl.innerText || '';
+            // 이미지 생성 관련 메타 텍스트 필터링
+            const cleaned = text.trim()
+                .replace(/^image_generated\s*/gi, '')
+                .replace(/^\[이미지[^\]]*\]\s*/gi, '')
+                .replace(/^\[Image[^\]]*\]\s*/gi, '');
+            if (cleaned.length > 0) return cleaned;
+        }
+
+        // 2. 코드 블록 영역 확인
+        const codeBlocks = lastResponse.querySelectorAll('code-block, pre code');
+        if (codeBlocks.length > 0) {
+            let codeText = '';
+            codeBlocks.forEach(block => {
+                const code = block.innerText || block.textContent || '';
+                codeText += code + '\n';
+            });
+            if (codeText.trim().length > 0) return codeText.trim();
+        }
+
+        // 3. 일반 텍스트 추출 (이미지 버튼 영역 제외)
+        let text = '';
+        const walker = document.createTreeWalker(lastResponse, NodeFilter.SHOW_TEXT, {
+            acceptNode: function (node) {
+                // 이미지 버튼이나 이미지 관련 요소 내부 텍스트 제외
+                const parent = node.parentElement;
+                if (parent && (
+                    parent.closest('button.image-button') ||
+                    parent.closest('.image-container') ||
+                    parent.closest('[data-image]') ||
+                    parent.closest('.generated-image') ||
+                    parent.tagName === 'BUTTON'
+                )) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+            }
+        });
+
+        let node;
+        while (node = walker.nextNode()) {
+            const nodeText = node.textContent.trim();
+            if (nodeText.length > 0) {
+                text += nodeText + ' ';
+            }
+        }
+
+        text = text.trim()
+            .replace(/^image_generated\s*/gi, '')
+            .replace(/^\[이미지[^\]]*\]\s*/gi, '')
+            .replace(/^\[Image[^\]]*\]\s*/gi, '');
+
+        // 4. 최종 fallback: innerText 직접 사용
+        if (text.length === 0) {
+            text = (lastResponse.innerText || '').trim()
+                .replace(/^image_generated\s*/gi, '')
+                .replace(/^\[이미지[^\]]*\]\s*/gi, '')
+                .replace(/^\[Image[^\]]*\]\s*/gi, '');
+        }
+
+        return text;
     },
 
     /**

@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Windows.Forms;
+using GeminiWebTranslator.Services;
 
 namespace GeminiWebTranslator.Forms
 {
@@ -11,11 +12,6 @@ namespace GeminiWebTranslator.Forms
     public class DebugForm : Form
     {
         private readonly MainForm _mainForm;
-        private readonly Color darkBg = Color.FromArgb(15, 15, 15);
-        private readonly Color darkPanel = Color.FromArgb(25, 25, 25);
-        private readonly Color accentBlue = Color.FromArgb(60, 180, 255);
-        private readonly Color accentGreen = Color.FromArgb(80, 200, 120);
-        private readonly Color darkText = Color.FromArgb(230, 230, 230);
         
         private RichTextBox? txtLog;
 
@@ -31,8 +27,8 @@ namespace GeminiWebTranslator.Forms
             this.Text = "🛠️ 디버그 및 로그";
             this.Size = new Size(700, 600);
             this.StartPosition = FormStartPosition.CenterParent;
-            this.BackColor = darkBg;
-            this.ForeColor = darkText;
+            this.BackColor = UiTheme.ColorBackground;
+            this.ForeColor = UiTheme.ColorText;
             this.FormBorderStyle = FormBorderStyle.Sizable;
             this.MinimumSize = new Size(500, 400);
 
@@ -42,7 +38,7 @@ namespace GeminiWebTranslator.Forms
                 Dock = DockStyle.Fill,
                 Orientation = Orientation.Horizontal,
                 SplitterDistance = 250,
-                BackColor = darkBg,
+                BackColor = UiTheme.ColorBackground,
                 Panel1MinSize = 180,
                 Panel2MinSize = 150
             };
@@ -61,38 +57,38 @@ namespace GeminiWebTranslator.Forms
             {
                 Text = "디버그 도구",
                 Font = new Font("Segoe UI Semibold", 14, FontStyle.Bold),
-                ForeColor = accentBlue,
+                ForeColor = UiTheme.ColorPrimary,
                 AutoSize = true,
                 Margin = new Padding(0, 0, 0, 15)
             };
 
             // WebView 브라우저 열기 (별도 창)
-            var btnOpenWebView = CreateDebugButton("🌐 WebView 브라우저 창 열기", accentBlue);
+            var btnOpenWebView = CreateDebugButton("🌐 WebView 브라우저 창 열기", UiTheme.ColorPrimary);
             btnOpenWebView.Click += (s, e) =>
             {
                 _mainForm.ShowBrowserWindow();
             };
 
             // 브라우저 캐시 초기화
-            var btnClearCache = CreateDebugButton("🧹 브라우저 캐시 초기화", Color.FromArgb(70, 70, 75));
+            var btnClearCache = CreateDebugButton("🧹 브라우저 캐시 초기화", UiTheme.ColorSurfaceLight);
             btnClearCache.Click += (s, e) => {
                 AppendLocalLog("[Debug] 브라우저 캐시 초기화 버튼 클릭 (미구현)");
             };
 
             // 브라우저 서비스 강제 재시작 버튼
-            var btnForceRestartBrowser = CreateDebugButton("🔥 브라우저 서비스 강제 재시작", Color.FromArgb(180, 70, 70));
+            var btnForceRestartBrowser = CreateDebugButton("🔥 브라우저 서비스 강제 재시작", UiTheme.ColorError);
             btnForceRestartBrowser.Click += async (s, e) => {
                 btnForceRestartBrowser.Enabled = false;
                 AppendLocalLog("[Debug] 브라우저 서비스 강제 재시작 요청됨...");
                 try
                 {
                     await _mainForm.ForceRestartBrowserServicesAsync();
-                    AppendLocalLog("[Debug] ✅ 브라우저 서비스 재시작 완료");
+                    AppendLocalLog("[Debug] [성공] 브라우저 서비스 재시작 완료");
                     MessageBox.Show("브라우저 서비스가 재시작되었습니다.", "성공", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 catch (Exception ex)
                 {
-                    AppendLocalLog($"[Debug] ❌ 재시작 실패: {ex.Message}");
+                    AppendLocalLog($"[Debug] [실패] 재시작 실패: {ex.Message}");
                     MessageBox.Show($"재시작 실패: {ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
                 finally
@@ -101,12 +97,54 @@ namespace GeminiWebTranslator.Forms
                 }
             };
 
-            // WebView 개발자 도구 열기
-            var btnDevTools = CreateDebugButton("🛠️ WebView 개발자 도구 (F12)", Color.FromArgb(0, 150, 136));
-            btnDevTools.Click += (s, e) => _mainForm.OpenWebViewDevTools();
+            // WebView 재시작
+            var btnRestartWebView = CreateDebugButton("🔄 WebView 재시작", UiTheme.ColorSuccess);
+            btnRestartWebView.Click += async (s, e) =>
+            {
+                btnRestartWebView.Enabled = false;
+                AppendLocalLog("[Debug] WebView 재시작 요청됨...");
+                try
+                {
+                    await _mainForm.RestartWebViewAsync();
+                    AppendLocalLog("[Debug] [성공] WebView 재시작 완료");
+                    MessageBox.Show("WebView가 재시작되었습니다.", "성공", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    AppendLocalLog($"[Debug] [실패] WebView 재시작 실패: {ex.Message}");
+                    MessageBox.Show($"WebView 재시작 실패: {ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    btnRestartWebView.Enabled = true;
+                }
+            };
+
+            // WebView 새 채팅 시작
+            var btnNewChat = CreateDebugButton("💬 새 채팅 시작", UiTheme.ColorPrimary);
+            btnNewChat.Click += async (s, e) =>
+            {
+                btnNewChat.Enabled = false;
+                AppendLocalLog("[Debug] WebView 새 채팅 시작 요청됨...");
+                try
+                {
+                    await _mainForm.StartNewChatAsync();
+                    AppendLocalLog("[Debug] [성공] 새 채팅 시작 완료");
+                    MessageBox.Show("새 채팅이 시작되었습니다.", "성공", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    AppendLocalLog($"[Debug] [실패] 새 채팅 시작 실패: {ex.Message}");
+                    MessageBox.Show($"새 채팅 시작 실패: {ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    btnNewChat.Enabled = true;
+                }
+            };
 
             // 로그 폴더 열기 버튼
-            var btnOpenLogs = CreateDebugButton("📂 로그 폴더 열기", Color.FromArgb(60, 60, 80));
+            var btnOpenLogs = CreateDebugButton("📂 로그 폴더 열기", UiTheme.ColorSurfaceLight);
             btnOpenLogs.Click += (s, e) => {
                 try 
                 {
@@ -120,14 +158,14 @@ namespace GeminiWebTranslator.Forms
             };
 
             // 로그 지우기 버튼
-            var btnClearLog = CreateDebugButton("🗑️ 로그 지우기", Color.FromArgb(50, 50, 55));
+            var btnClearLog = CreateDebugButton("🗑️ 로그 지우기", UiTheme.ColorSurface);
             btnClearLog.Click += (s, e) => {
                 txtLog?.Clear();
                 _mainForm.ClearLogs();
             };
 
             buttonPanel.Controls.AddRange(new Control[] { 
-                lblTitle, btnOpenWebView, btnDevTools, btnClearCache, 
+                lblTitle, btnOpenWebView, btnRestartWebView, btnNewChat, btnClearCache, 
                 btnForceRestartBrowser, btnOpenLogs, btnClearLog 
             });
             splitContainer.Panel1.Controls.Add(buttonPanel);
@@ -137,7 +175,7 @@ namespace GeminiWebTranslator.Forms
             {
                 Text = " 실시간 로그 ",
                 Dock = DockStyle.Fill,
-                ForeColor = Color.FromArgb(180, 180, 180),
+                ForeColor = UiTheme.ColorTextMuted,
                 Font = new Font("Segoe UI", 9),
                 Padding = new Padding(10)
             };
@@ -146,8 +184,8 @@ namespace GeminiWebTranslator.Forms
             {
                 Dock = DockStyle.Fill,
                 ReadOnly = true,
-                BackColor = Color.Black,
-                ForeColor = Color.FromArgb(80, 255, 100),
+                BackColor = UiTheme.ColorBackground,
+                ForeColor = UiTheme.ColorSuccess,
                 Font = new Font("Cascadia Code", 10),
                 BorderStyle = BorderStyle.None,
                 WordWrap = false

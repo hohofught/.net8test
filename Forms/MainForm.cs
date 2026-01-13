@@ -23,7 +23,7 @@ public partial class MainForm : Form
     public static bool IsAlwaysOnTop { get; set; } = false;
     
     #region UI 컨트롤
-    private Panel controlPanel = null!;
+
     
     // 텍스트 입력 및 출력 관련
     private TextBox txtInput = null!;
@@ -33,9 +33,10 @@ public partial class MainForm : Form
     // 설정 드롭다운들
     private ComboBox cmbTargetLang = null!;
     private ComboBox cmbStyle = null!;
-    private ComboBox cmbGeminiModel = null!;
-    private CheckBox chkUseCustomPrompt = null!;
+
     private CheckBox chkHttpMode = null!; // HTTP 모드 활성화 체크박스
+    private Button btnSettings = null!; // 통합 설정 버튼
+    private Label lblSettingsStatus = null!; // 설정 상태 라벨
 
     // 모드 선택 버튼
     private Button btnModeHttp = null!;
@@ -112,14 +113,8 @@ public partial class MainForm : Form
     // 시스템 상태 모니터링 타이머
     private System.Windows.Forms.Timer statusTimer = null!;
 
-    #region 테마 색상 (현대적인 다크 모드)
-    private readonly Color darkBg = Color.FromArgb(10, 10, 10);      // 아주 깊은 검정
-    private readonly Color darkPanel = Color.FromArgb(20, 20, 20);   // 패널용 짙은 회색
-    private readonly Color darkText = Color.FromArgb(240, 240, 240); // 고대비 텍스트
-    private readonly Color accentBlue = Color.FromArgb(60, 180, 255); // 밝은 파랑
-    private readonly Color accentGreen = Color.FromArgb(80, 200, 120);// 에메랄드 그린
-    private readonly Color borderColor = Color.FromArgb(40, 40, 40);   // 구분선 색상
-    #endregion
+    // 테마 색상은 UiTheme 클래스로 통합되었습니다.
+
 
 
     // --- New Features ---
@@ -214,30 +209,10 @@ public partial class MainForm : Form
         };
 
         // 모델 선택 시(Flash/Pro) 즉시 반영
-        cmbGeminiModel.SelectedIndexChanged += async (s, e) => {
-            string model = cmbGeminiModel.SelectedIndex == 0 ? "flash" : "pro";
-            AppendLog($"[모델 선택] {model}로 전환 시도...");
-            
-            if (httpClient != null) httpClient.Model = model;
-            
-            // 브라우저 자동화 호출 시 연결 끊김 예외 처리
-            try
-            {
-                if (useWebView2Mode && automation != null) await automation.SelectModelAsync(model);
-                if (useBrowserMode && browserAutomation != null) await browserAutomation.SelectModelAsync(model);
-            }
-            catch (PuppeteerSharp.TargetClosedException ex)
-            {
-                AppendLog($"[WARN] 브라우저 연결 끊김 - 모델 전환 실패: {ex.Message}");
-                UpdateStatus("🔌 브라우저 연결 끊김", Color.Orange);
-                // 연결 끊김 시 자동화 인스턴스 초기화
-                browserAutomation = null;
-            }
-            catch (Exception ex)
-            {
-                AppendLog($"[ERROR] 모델 전환 중 예외: {ex.Message}");
-            }
-        };
+        // Flash가 제거되었으므로 Index 0은 항상 "Pro"입니다. (필요 시 확장 가능)
+        // 모델 선택 로직 제거 - 항상 Pro 사용
+        // Flash가 제거되었으므로 Index 0은 항상 "Pro"입니다.
+        /* cmbGeminiModel logic removed */
 
         // 시스템 로깅 서비스 구독은 Load 이벤트 이후로 지연 (UI 초기화 완료 후)
         // LogService.Instance.OnLogMessage 구독은 MainForm_Load에서 수행
@@ -277,29 +252,29 @@ public partial class MainForm : Form
             // 1. HTTP 모드 상태 로직
             if (!chkHttpMode.Checked)
             {
-                UpdateSpecificStatus(pnlStatusHttp, lblStatusHttp, "HTTP (꺼짐)", Color.Gray);
+                UpdateSpecificStatus(pnlStatusHttp, lblStatusHttp, "HTTP (꺼짐)", UiTheme.ColorStatusOff);
             }
             else if (httpClient?.IsInitialized == true)
             {
-                UpdateSpecificStatus(pnlStatusHttp, lblStatusHttp, "HTTP (준비됨)", Color.Lime);
+                UpdateSpecificStatus(pnlStatusHttp, lblStatusHttp, "HTTP (준비됨)", UiTheme.ColorSuccess);
             }
             else if (File.Exists(cookiePath)) 
             {
-                UpdateSpecificStatus(pnlStatusHttp, lblStatusHttp, "HTTP (연결중..)", Color.Orange);
+                UpdateSpecificStatus(pnlStatusHttp, lblStatusHttp, "HTTP (연결중..)", UiTheme.ColorWarning);
             }
             else
             {
-                UpdateSpecificStatus(pnlStatusHttp, lblStatusHttp, "HTTP (설정필요)", Color.IndianRed);
+                UpdateSpecificStatus(pnlStatusHttp, lblStatusHttp, "HTTP (설정필요)", UiTheme.ColorError);
             }
 
             // 2. Browser 모드 진단
             if (browserAutomation != null && browserAutomation.IsConnected) // 연결 상태 확인 로직 필요
             {
-                UpdateSpecificStatus(pnlStatusBrowser, lblStatusBrowser, "Browser (연결됨)", Color.Lime);
+                UpdateSpecificStatus(pnlStatusBrowser, lblStatusBrowser, "Browser (연결됨)", UiTheme.ColorSuccess);
             }
             else
             {
-                UpdateSpecificStatus(pnlStatusBrowser, lblStatusBrowser, "Browser (꺼짐)", Color.Gray);
+                UpdateSpecificStatus(pnlStatusBrowser, lblStatusBrowser, "Browser (꺼짐)", UiTheme.ColorStatusOff);
             }
 
             // 3. WebView 모드 진단
@@ -313,24 +288,24 @@ public partial class MainForm : Form
 
                 switch (diag.Status)
                 {
-                    case WebViewStatus.Ready: msg = "WebView (준비됨)"; col = Color.Lime; break;
-                    case WebViewStatus.Generating: msg = "WebView (생성중)"; col = Color.Orange; break;
-                    case WebViewStatus.Loading: msg = "WebView (로딩중)"; col = Color.SkyBlue; break;
-                    case WebViewStatus.WrongPage: msg = "WebView (페이지이동필요)"; col = Color.Orange; break;
-                    case WebViewStatus.LoginNeeded: msg = "WebView (로그인필요)"; col = Color.Red; break;
-                    case WebViewStatus.Disconnected: msg = "WebView (연결끊김)"; col = Color.Gray; break;
-                    case WebViewStatus.NotInitialized: msg = "WebView (초기화중)"; col = Color.Gray; break;
+                    case WebViewStatus.Ready: msg = "WebView (준비됨)"; col = UiTheme.ColorSuccess; break;
+                    case WebViewStatus.Generating: msg = "WebView (생성중)"; col = UiTheme.ColorWarning; break;
+                    case WebViewStatus.Loading: msg = "WebView (로딩중)"; col = UiTheme.ColorPrimary; break;
+                    case WebViewStatus.WrongPage: msg = "WebView (페이지이동필요)"; col = UiTheme.ColorWarning; break;
+                    case WebViewStatus.LoginNeeded: msg = "WebView (로그인필요)"; col = UiTheme.ColorError; break;
+                    case WebViewStatus.Disconnected: msg = "WebView (연결끊김)"; col = UiTheme.ColorStatusOff; break;
+                    case WebViewStatus.NotInitialized: msg = "WebView (초기화중)"; col = UiTheme.ColorStatusOff; break;
                     case WebViewStatus.Error:
                     default:
                         msg = string.IsNullOrEmpty(diag.ErrorMessage) ? "WebView (오류)" : $"WebView (오류: {diag.ErrorMessage})";
-                        col = Color.IndianRed;
+                        col = UiTheme.ColorError;
                         break;
                 }
                 UpdateSpecificStatus(pnlStatusWebView, lblStatusWebView, msg, col);
             }
             else
             {
-                UpdateSpecificStatus(pnlStatusWebView, lblStatusWebView, "WebView (꺼짐)", Color.Gray);
+                UpdateSpecificStatus(pnlStatusWebView, lblStatusWebView, "WebView (꺼짐)", UiTheme.ColorStatusOff);
             }
         }
         catch { }
@@ -486,16 +461,81 @@ public partial class MainForm : Form
     }
 
     /// <summary>
-    /// WebView 개발자 도구를 엽니다 (디버깅용)
+    /// WebView를 재시작합니다 (디버깅용)
     /// </summary>
-    public void OpenWebViewDevTools()
+    public async Task RestartWebViewAsync()
     {
-        if (webView != null && webView.CoreWebView2 != null)
+        AppendLog("[WebView] 재시작 요청됨...");
+        
+        try
         {
-            webView.CoreWebView2.OpenDevToolsWindow();
+            // 1. 기존 automation 정리
+            automation = null;
+            
+            // 2. WebView 재초기화
+            if (webView != null && webView.CoreWebView2 != null)
+            {
+                // 새 페이지로 이동 후 Gemini로 돌아가기
+                webView.CoreWebView2.Navigate("about:blank");
+                await Task.Delay(500);
+                webView.CoreWebView2.Navigate("https://gemini.google.com/app");
+                await Task.Delay(2000);
+                
+                // 3. Automation 재생성
+                automation = new GeminiAutomation(webView);
+                
+                AppendLog("[WebView] 재시작 완료");
+                UpdateStatus("WebView 재시작됨", Color.LightGreen);
+            }
+            else
+            {
+                AppendLog("[WebView] WebView가 초기화되지 않았습니다. 초기화 시도...");
+                InitializeWebView2Async();
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"[WebView] 재시작 실패: {ex.Message}");
+            throw;
         }
     }
-
+    
+    /// <summary>
+    /// 새 채팅을 시작합니다 (WebView 모드용)
+    /// </summary>
+    public async Task StartNewChatAsync()
+    {
+        AppendLog("[WebView] 새 채팅 시작 요청됨...");
+        
+        try
+        {
+            if (automation != null)
+            {
+                await automation.StartNewChatAsync();
+                AppendLog("[WebView] 새 채팅 시작 완료");
+                UpdateStatus("새 채팅 시작됨", Color.LightGreen);
+            }
+            else if (webView != null && webView.CoreWebView2 != null)
+            {
+                // automation이 없으면 직접 스크립트 실행
+                var result = await webView.CoreWebView2.ExecuteScriptAsync(GeminiWebTranslator.Automation.GeminiScripts.NewChatScript);
+                AppendLog($"[WebView] 새 채팅 스크립트 결과: {result}");
+                
+                // 입력창 준비 대기
+                await Task.Delay(2000);
+                UpdateStatus("새 채팅 시작됨", Color.LightGreen);
+            }
+            else
+            {
+                throw new InvalidOperationException("WebView가 초기화되지 않았습니다.");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"[WebView] 새 채팅 시작 실패: {ex.Message}");
+            throw;
+        }
+    }
 
     /// <summary>
     /// WebView2 초기화 - 프로그램 시작 시 백그라운드에서 실행
@@ -526,7 +566,7 @@ public partial class MainForm : Form
                 {
                     if (args.IsSuccess && webView.Source?.ToString().Contains("gemini.google.com") == true)
                     {
-                         UpdateStatus("✅ WebView 준비 완료", Color.Green);
+                         UpdateStatus("[성공] WebView 준비 완료", Color.Green);
                          AppendLog("[WebView] Gemini 로드 성공");
                          
                          // 자동화 객체 연결
@@ -570,12 +610,12 @@ public partial class MainForm : Form
             if (await httpClient.InitializeAsync(cookiePath))
             {
                 btnTranslate.Enabled = true;
-                UpdateStatus("✅ 준비 완료", Color.Green);
+                UpdateStatus("[성공] 준비 완료", Color.Green);
             }
         }
         catch (Exception ex)
         {
-            UpdateStatus("⚠️ 쿠키 만료/오류", Color.Orange);
+            UpdateStatus("[경고] 쿠키 만료/오류", Color.Orange);
             if (!silent)
             {
                 MessageBox.Show($"저장된 쿠키로 초기화 실패: {ex.Message}\n쿠키를 다시 설정하거나 재연결을 시도하세요.", "알림", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -640,7 +680,7 @@ public partial class MainForm : Form
         // 5. 상태 초기화
         useBrowserMode = false;
         useWebView2Mode = false;
-        UpdateStatus("🔄 브라우저 서비스 재시작됨 - 모드 재선택 필요", Color.Cyan);
+        UpdateStatus("🔄 브라우저 서비스 재시작됨 - 모드 재선택 필요", UiTheme.ColorWarning);
         UpdateModeButtonsUI(null); // 모든 강조 해제
         
         // 버튼 상태 복구
@@ -655,11 +695,9 @@ public partial class MainForm : Form
     private void UpdateModeButtonsUI(Button? activeButton)
     {
         // 기본 색상 정의
-        Color defaultGray = Color.FromArgb(60, 60, 70);
-        
-        if (btnModeHttp != null) btnModeHttp.BackColor = (btnModeHttp == activeButton) ? accentBlue : Color.FromArgb(45, 45, 50);
-        if (btnModeWebView != null) btnModeWebView.BackColor = (btnModeWebView == activeButton) ? Color.FromArgb(0, 150, 136) : Color.FromArgb(45, 45, 50);
-        if (btnModeBrowser != null) btnModeBrowser.BackColor = (btnModeBrowser == activeButton) ? Color.FromArgb(255, 140, 0) : Color.FromArgb(45, 45, 50);
+        if (btnModeHttp != null) btnModeHttp.BackColor = (btnModeHttp == activeButton) ? UiTheme.ColorPrimary : UiTheme.ColorSurfaceLight;
+        if (btnModeWebView != null) btnModeWebView.BackColor = (btnModeWebView == activeButton) ? UiTheme.ColorPrimary : UiTheme.ColorSurfaceLight;
+        if (btnModeBrowser != null) btnModeBrowser.BackColor = (btnModeBrowser == activeButton) ? UiTheme.ColorPrimary : UiTheme.ColorSurfaceLight;
         
         // 선택된 버튼 텍스트 두껍게 (선택 사항)
         if (btnModeHttp != null) btnModeHttp.Font = new Font(btnModeHttp.Font, btnModeHttp == activeButton ? FontStyle.Bold : FontStyle.Regular);
@@ -681,7 +719,7 @@ public partial class MainForm : Form
         {
             // HTTP 모드 활성화
             btnModeHttp.Enabled = true;
-            btnModeHttp.BackColor = accentBlue;
+            btnModeHttp.BackColor = UiTheme.ColorPrimary;
             btnModeHttp.ForeColor = Color.White;
             AppendLog("[HTTP] HTTP 모드 활성화됨 - 설정 버튼 사용 가능");
             
@@ -771,25 +809,7 @@ public partial class MainForm : Form
             InitializeWebView2Async();
             
             // 모델 선택 지연 적용
-            _ = Task.Run(async () => {
-                await Task.Delay(2000);
-                try
-                {
-                    if (IsDisposed || !IsHandleCreated) return;
-                    await (Task)Invoke(new Func<Task>(async () => { 
-                        try
-                        {
-                            if (cmbGeminiModel != null && !IsDisposed && automation != null)
-                            {
-                                var model = cmbGeminiModel.SelectedIndex == 0 ? "flash" : "pro";
-                                await automation.SelectModelAsync(model);
-                            }
-                        }
-                        catch { }
-                    }));
-                }
-                catch { }
-            });
+
         }
         catch (Exception ex)
         {
@@ -838,19 +858,7 @@ public partial class MainForm : Form
                     AppendLog("[알림] 브라우저 모드 중 NanoBanana를 실행하면 브라우저 모드가 자동 해제됩니다.");
                 }
                 
-                // 모델 선택 동기화 (필요시)
-                _ = Task.Run(async () => {
-                   await Task.Delay(1000);
-                   try {
-                       if (this.browserAutomation != null && cmbGeminiModel != null && !IsDisposed)
-                       {
-                           string model = "flash";
-                           Invoke(() => model = cmbGeminiModel.SelectedIndex == 0 ? "flash" : "pro");
-                           // EdgeCdpAutomation에는 SelectModel이 있나? IGeminiAutomation에는 있음.
-                           // await this.browserAutomation.SelectModelAsync(model); // 필요시 주석 해제
-                       }
-                   } catch {}
-                });
+
             }
             else
             {
@@ -927,130 +935,96 @@ public partial class MainForm : Form
             pf.ShowDialog(this);
         }
     }
-
-
-    // --- New Features Logic ---
-    private Button btnCheckCustomPrompt = null!;
     
     /// <summary>
-    /// 커스텀 프롬프트 체크박스가 변경될 때 호출됩니다.
+    /// 통합 설정 버튼 클릭 - TranslationSettingsForm 열기
     /// </summary>
-    private void ChkUseCustomPrompt_CheckedChanged(object? sender, EventArgs e)
+    private void BtnSettings_Click(object? sender, EventArgs e)
     {
-        if (chkUseCustomPrompt.Checked)
+        var currentLang = cmbTargetLang.SelectedItem?.ToString();
+        var currentStyle = cmbStyle.SelectedItem?.ToString();
+        
+        using (var settingsForm = new GeminiWebTranslator.Forms.TranslationSettingsForm(
+            currentSettings,
+            currentLang,
+            currentStyle,
+            CustomTranslationPrompt,
+            loadedGlossaryPath))
         {
-            // 체크됨: 프롬프트 설정 창 열기
-            OpenCustomPromptEditor();
-        }
-        else
-        {
-            // 체크 해제: 프롬프트 비활성화
-            CustomTranslationPrompt = null;
-            UpdateStatus("커스텀 프롬프트 비활성화됨", Color.Orange);
-            AppendLog("[커스텀 프롬프트] 비활성화됨");
-        }
-    }
-    
-    /// <summary>
-    /// 커스텀 프롬프트 편집 창을 엽니다 (파일 모드/일반 모드 모두 지원)
-    /// </summary>
-    private void OpenCustomPromptEditor()
-    {
-        // 파일 모드: 미리보기 폼 사용
-        if (isFileMode && (loadedTsvLines != null || loadedJsonData != null))
-        {
-            var linesForPreview = loadedTsvLines ?? loadedJsonData?.ToString().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).ToList();
-            if (linesForPreview != null)
+            if (settingsForm.ShowDialog() == DialogResult.OK)
             {
-                try 
+                // 설정 적용
+                currentSettings = settingsForm.Settings;
+                loadedGlossaryPath = settingsForm.GlossaryPath;
+                
+                // 언어 업데이트
+                SelectComboItem(cmbTargetLang, settingsForm.TargetLanguage);
+                
+                // 스타일 업데이트
+                SelectComboItem(cmbStyle, settingsForm.TranslationStyle);
+                
+                // 커스텀 프롬프트 업데이트
+                if (settingsForm.UseCustomPrompt)
                 {
-                    var generator = CreateAiGenerator();
-                    var targetLang = cmbTargetLang.SelectedItem?.ToString()?.Split('(')[0].Trim() ?? "한국어";
-                    using (var promptForm = new GeminiWebTranslator.Forms.PromptCustomizationForm(
-                        linesForPreview, generator, targetLang, currentSettings.Glossary))
-                    {
-                        if (promptForm.ShowDialog() == DialogResult.OK)
-                        {
-                            CustomTranslationPrompt = promptForm.GeneratedPrompt;
-                            chkUseCustomPrompt.Checked = true;
-                            UpdateStatus("✅ 커스텀 프롬프트가 업데이트되었습니다.", Color.LightGreen);
-                        }
-                        else if (string.IsNullOrWhiteSpace(CustomTranslationPrompt))
-                        {
-                            chkUseCustomPrompt.Checked = false;
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"폼 열기 실패: {ex.Message}\n먼저 API/브라우저 모드를 활성화하세요.", "오류");
-                    chkUseCustomPrompt.Checked = false;
-                }
-            }
-        }
-        else
-        {
-            // 일반 모드: 간단한 텍스트 입력 폼
-            using (var editForm = new Form())
-            {
-                editForm.Text = "커스텀 번역 프롬프트 설정";
-                editForm.Size = new Size(600, 400);
-                editForm.StartPosition = FormStartPosition.CenterParent;
-                editForm.BackColor = Color.FromArgb(30, 30, 35);
-                
-                var lbl = new Label { 
-                    Text = "번역 시 AI에게 전달할 커스텀 지침을 입력하세요:", 
-                    Dock = DockStyle.Top, Height = 30, 
-                    ForeColor = Color.White, Padding = new Padding(10, 10, 10, 0) 
-                };
-                
-                var txt = new TextBox { 
-                    Multiline = true, 
-                    Dock = DockStyle.Fill, 
-                    ScrollBars = ScrollBars.Vertical,
-                    Font = new Font("Consolas", 11),
-                    BackColor = Color.FromArgb(40, 40, 45),
-                    ForeColor = Color.White,
-                    Text = CustomTranslationPrompt ?? ""
-                };
-                
-                var btnPanel = new Panel { Dock = DockStyle.Bottom, Height = 50, BackColor = Color.FromArgb(25, 25, 30) };
-                var btnOk = new Button { Text = "적용", Width = 100, Height = 35, Location = new Point(380, 8), BackColor = Color.FromArgb(80, 200, 120), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-                var btnClear = new Button { Text = "초기화", Width = 80, Height = 35, Location = new Point(280, 8), BackColor = Color.FromArgb(200, 80, 80), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-                var btnCancelEdit = new Button { Text = "취소", Width = 80, Height = 35, Location = new Point(490, 8), BackColor = Color.FromArgb(60, 60, 70), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
-                
-                btnOk.Click += (s, ev) => { 
-                    CustomTranslationPrompt = txt.Text.Trim(); 
-                    editForm.DialogResult = DialogResult.OK; 
-                    editForm.Close(); 
-                };
-                btnClear.Click += (s, ev) => { txt.Text = ""; };
-                btnCancelEdit.Click += (s, ev) => { editForm.DialogResult = DialogResult.Cancel; editForm.Close(); };
-                
-                btnPanel.Controls.AddRange(new Control[] { btnOk, btnClear, btnCancelEdit });
-                editForm.Controls.Add(txt);
-                editForm.Controls.Add(lbl);
-                editForm.Controls.Add(btnPanel);
-                
-                if (editForm.ShowDialog() == DialogResult.OK && !string.IsNullOrWhiteSpace(CustomTranslationPrompt))
-                {
-                    chkUseCustomPrompt.Checked = true;
-                    UpdateStatus("✅ 커스텀 프롬프트 설정됨", Color.LightGreen);
-                    AppendLog($"[커스텀 프롬프트] 설정됨: {CustomTranslationPrompt.Substring(0, Math.Min(50, CustomTranslationPrompt.Length))}...");
+                    CustomTranslationPrompt = settingsForm.CustomPromptText;
+                    UpdateSettingsStatusUI();
+                    AppendLog($"[설정] 커스텀 프롬프트 적용됨");
                 }
                 else
                 {
-                    if (string.IsNullOrWhiteSpace(CustomTranslationPrompt))
-                        chkUseCustomPrompt.Checked = false;
+                    CustomTranslationPrompt = null;
+                    UpdateSettingsStatusUI();
                 }
+                
+                // 단어장 로그
+                if (currentSettings.Glossary.Count > 0)
+                {
+                    AppendLog($"[설정] 단어장: {currentSettings.Glossary.Count}개");
+                }
+                
+                UpdateStatus("[성공] 설정이 적용되었습니다.", Color.LightGreen);
             }
         }
     }
     
-    private void BtnCheckCustomPrompt_Click(object? sender, EventArgs e)
+    /// <summary>
+    /// 콤보박스 아이템 선택 헬퍼
+    /// </summary>
+    private void SelectComboItem(ComboBox combo, string text)
     {
-        // 버튼 클릭 시 편집기 열기
-        OpenCustomPromptEditor();
+        for (int i = 0; i < combo.Items.Count; i++)
+        {
+            if (combo.Items[i]?.ToString()?.Contains(text) == true)
+            {
+                combo.SelectedIndex = i;
+                return;
+            }
+        }
+    }
+    
+    /// <summary>
+    /// 설정 상태 UI 업데이트
+    /// </summary>
+    private void UpdateSettingsStatusUI()
+    {
+        if (lblSettingsStatus == null) return;
+        
+        var parts = new List<string>();
+        
+        if (!string.IsNullOrWhiteSpace(CustomTranslationPrompt))
+            parts.Add("프롬프트");
+        if (currentSettings.Glossary.Count > 0)
+            parts.Add($"단어장({currentSettings.Glossary.Count})");
+        
+        if (parts.Count > 0)
+        {
+            lblSettingsStatus.Text = string.Join(", ", parts);
+            lblSettingsStatus.ForeColor = UiTheme.ColorSuccess;
+        }
+        else
+        {
+            lblSettingsStatus.Text = "";
+        }
     }
 
     private async void BtnNanoBanana_Click(object? sender, EventArgs e)
@@ -1085,20 +1059,16 @@ public partial class MainForm : Form
             UpdateStatus("브라우저 모드 해제됨", Color.Yellow);
         }
         
-        // 2. NanoBanana 실행 시 안정성을 위해 WebView 모드로 강제 전환 및 타 모드 차단
-        if (!useWebView2Mode)
-        {
-            BtnModeWebView_Click(null, EventArgs.Empty);
-        }
+        // 2. NanoBanana 안내 메시지 표시
+        //    WebView 모드에서는 이미지 기능이 지원되지 않으므로 독립 브라우저를 사용함
+        AppendLog("[NanoBanana] 독립 브라우저 (Chrome for Testing)로 이미지 처리를 시작합니다.");
+        AppendLog("[알림] WebView 모드는 비로그인 상태이므로 이미지 기능이 지원되지 않습니다.");
+        
         SetMainModesEnabled(false);
 
-        // 3. 폼 생성 및 표시 (임베디드 webView 전달)
-        if (automation == null && webView != null) 
-        {
-            automation = new GeminiAutomation(webView);
-        }
-
-        _nanoBananaForm = new NanoBananaMainForm(webView, automation);
+        // 3. NanoBanana 폼 생성 (독립 브라우저 모드에서 작동)
+        //    WebView와 automation을 전달하지 않음 - NanoBanana는 자체 브라우저를 사용
+        _nanoBananaForm = new NanoBananaMainForm(null, null);
         
         _nanoBananaForm.FormClosed += async (ss, ee) =>
         {

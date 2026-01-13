@@ -11,8 +11,7 @@ using Emgu.CV.Structure;
 namespace GeminiWebTranslator.Services
 {
     /// <summary>
-    /// OCR 바운딩 박스와 OpenCV Inpainting을 사용한 워터마크 제거 서비스
-    /// 실험적 기능 - 로컬에서 워터마크를 직접 제거
+    /// OCR 좌표와 OpenCV Inpainting을 사용하여 워터마크를 로컬에서 제거하는 서비스
     /// </summary>
     public class WatermarkRemovalService
     {
@@ -24,191 +23,123 @@ namespace GeminiWebTranslator.Services
         }
         
         /// <summary>
-        /// 이미지에서 워터마크를 감지하고 제거
+        /// 이미지에서 감지된 워터마크 영역을 Inpainting으로 제거
         /// </summary>
-        /// <param name="inputPath">입력 이미지 경로</param>
-        /// <param name="outputPath">출력 이미지 경로 (null이면 덮어쓰기)</param>
-        /// <param name="inpaintRadius">Inpainting 반경 (기본 5)</param>
-        /// <returns>제거된 워터마크 수</returns>
+        /// <param name="inputPath">원본 이미지 경로</param>
+        /// <param name="outputPath">저장 경로 (null이면 원본 덮어쓰기)</param>
+        /// <param name="inpaintRadius">Inpainting 주변 참조 반경 (기본 5)</param>
+        /// <returns>제거된 워터마크 영역 수</returns>
         public async Task<int> RemoveWatermarksAsync(string inputPath, string? outputPath = null, int inpaintRadius = 5)
         {
-            // 워터마크 영역 감지
             var regions = await _ocrService.GetWatermarkRegionsAsync(inputPath);
+            if (regions.Count == 0) return 0;
             
-            if (regions.Count == 0)
-            {
-                System.Diagnostics.Debug.WriteLine("No watermarks detected.");
-                return 0;
-            }
+            // OpenCV 이미지 로드
+            using var src = CvInvoke.Imread(inputPath, ImreadModes.Color);
+            if (src.IsEmpty) return 0;
             
-            System.Diagnostics.Debug.WriteLine($"Detected {regions.Count} watermark region(s).");
-            
-            // OpenCV로 Inpainting 수행
-            using var srcImage = CvInvoke.Imread(inputPath, ImreadModes.Color);
-            if (srcImage.IsEmpty)
-            {
-                System.Diagnostics.Debug.WriteLine("Failed to load image for inpainting.");
-                return 0;
-            }
-            
-            // 마스크 생성 (워터마크 영역은 흰색)
-            using var mask = new Mat(srcImage.Size, DepthType.Cv8U, 1);
-            mask.SetTo(new MCvScalar(0)); // 전체 검정색
-            
-            foreach (var bbox in regions)
-            {
-                // 바운딩 박스를 약간 확장 (마진 추가)
-                int margin = 3;
-                int x = Math.Max(0, (int)bbox.Left - margin);
-                int y = Math.Max(0, (int)bbox.Top - margin);
-                int width = Math.Min(srcImage.Width - x, bbox.Width + margin * 2);
-                int height = Math.Min(srcImage.Height - y, bbox.Height + margin * 2);
-                
-                if (width > 0 && height > 0)
-                {
-                    var rect = new Rectangle(x, y, width, height);
-                    CvInvoke.Rectangle(mask, rect, new MCvScalar(255), -1); // 흰색으로 채우기
-                    System.Diagnostics.Debug.WriteLine($"Masked region: {rect}");
-                }
-            }
-            
-            // Inpainting 수행
-            using var result = new Mat();
-            CvInvoke.Inpaint(srcImage, mask, result, inpaintRadius, InpaintType.Telea);
-            
-            // 결과 저장
-            string savePath = outputPath ?? inputPath;
-            CvInvoke.Imwrite(savePath, result);
-            
-            System.Diagnostics.Debug.WriteLine($"Inpainted image saved to: {savePath}");
-            
-            return regions.Count;
-        }
-        
-        /// <summary>
-        /// 배치 워터마크 제거
-        /// </summary>
-        public async Task<Dictionary<string, int>> RemoveWatermarksBatchAsync(
-            string inputFolder,
-            string outputFolder,
-            IProgress<(int current, int total, string filename)>? progress = null)
-        {
-            var results = new Dictionary<string, int>();
-            
-            string[] extensions = { "*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp" };
-            var imageFiles = new List<string>();
-            
-            foreach (var ext in extensions)
-            {
-                imageFiles.AddRange(Directory.GetFiles(inputFolder, ext, SearchOption.TopDirectoryOnly));
-            }
-            
-            imageFiles.Sort();
-            int total = imageFiles.Count;
-            int current = 0;
-            
-            foreach (var imagePath in imageFiles)
-            {
-                current++;
-                var filename = Path.GetFileName(imagePath);
-                progress?.Report((current, total, filename));
-                
-                try
-                {
-                    var outputPath = Path.Combine(outputFolder, filename);
-                    int removed = await RemoveWatermarksAsync(imagePath, outputPath);
-                    results[filename] = removed;
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"Error processing {filename}: {ex.Message}");
-                    results[filename] = -1; // 오류 표시
-                }
-            }
-            
-            return results;
-        }
-        
-        /// <summary>
-        /// 이미지 전처리: 워터마크 제거 후 Bitmap 반환 (Gemini 전송용)
-        /// </summary>
-        public async Task<Bitmap?> PreprocessImageAsync(string inputPath, int inpaintRadius = 5)
-        {
-            var regions = await _ocrService.GetWatermarkRegionsAsync(inputPath);
-            
-            if (regions.Count == 0)
-            {
-                // 워터마크 없으면 원본 반환
-                return new Bitmap(inputPath);
-            }
-            
-            using var srcImage = CvInvoke.Imread(inputPath, ImreadModes.Color);
-            if (srcImage.IsEmpty)
-                return null;
-            
-            using var mask = new Mat(srcImage.Size, DepthType.Cv8U, 1);
+            // 제거할 영역을 표시할 마스크 생성 (흰색 공간이 제거 대상)
+            using var mask = new Mat(src.Size, DepthType.Cv8U, 1);
             mask.SetTo(new MCvScalar(0));
             
             foreach (var bbox in regions)
             {
-                int margin = 3;
-                int x = Math.Max(0, (int)bbox.Left - margin);
-                int y = Math.Max(0, (int)bbox.Top - margin);
-                int width = Math.Min(srcImage.Width - x, bbox.Width + margin * 2);
-                int height = Math.Min(srcImage.Height - y, bbox.Height + margin * 2);
+                // 인식을 위해 텍스트에 딱 붙은 박스를 3px 정도 확장하여 경계면을 자연스럽게 만듦
+                int m = 3;
+                int x = Math.Max(0, (int)bbox.Left - m);
+                int y = Math.Max(0, (int)bbox.Top - m);
+                int w = Math.Min(src.Width - x, bbox.Width + m * 2);
+                int h = Math.Min(src.Height - y, bbox.Height + m * 2);
                 
-                if (width > 0 && height > 0)
-                {
-                    CvInvoke.Rectangle(mask, new Rectangle(x, y, width, height), new MCvScalar(255), -1);
-                }
+                if (w > 0 && h > 0)
+                    CvInvoke.Rectangle(mask, new Rectangle(x, y, w, h), new MCvScalar(255), -1);
             }
             
+            // Telea 알고리즘을 사용한 Inpainting (주변 픽셀을 채워넣어 복원)
             using var result = new Mat();
-            CvInvoke.Inpaint(srcImage, mask, result, inpaintRadius, InpaintType.Telea);
+            CvInvoke.Inpaint(src, mask, result, inpaintRadius, InpaintType.Telea);
             
-            // Mat를 Bitmap으로 수동 변환
-            return MatToBitmap(result);
+            CvInvoke.Imwrite(outputPath ?? inputPath, result);
+            return regions.Count;
         }
         
         /// <summary>
-        /// Emgu.CV Mat를 System.Drawing.Bitmap으로 변환
+        /// 폴더 내 모든 이미지의 워터마크를 일괄 제거
+        /// </summary>
+        public async Task<Dictionary<string, int>> RemoveWatermarksBatchAsync(string inputFolder, string outputFolder, IProgress<(int current, int total, string filename)>? progress = null)
+        {
+            var results = new Dictionary<string, int>();
+            var files = new List<string>();
+            foreach (var ext in new[] { "*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp" })
+                files.AddRange(Directory.GetFiles(inputFolder, ext, SearchOption.TopDirectoryOnly));
+            
+            files.Sort();
+            int total = files.Count;
+            int current = 0;
+            
+            foreach (var imgPath in files)
+            {
+                var fn = Path.GetFileName(imgPath);
+                progress?.Report((++current, total, fn));
+                try { results[fn] = await RemoveWatermarksAsync(imgPath, Path.Combine(outputFolder, fn)); }
+                catch { results[fn] = -1; }
+            }
+            return results;
+        }
+        
+        /// <summary>
+        /// Gemini 전송 전 워터마크가 제거된 비트맵 생성 (파일 저장 안함)
+        /// </summary>
+        public async Task<Bitmap?> PreprocessImageAsync(string inputPath, int inpaintRadius = 5)
+        {
+            var regions = await _ocrService.GetWatermarkRegionsAsync(inputPath);
+            if (regions.Count == 0) return new Bitmap(inputPath);
+            
+            using var src = CvInvoke.Imread(inputPath, ImreadModes.Color);
+            if (src.IsEmpty) return null;
+            
+            using var mask = new Mat(src.Size, DepthType.Cv8U, 1);
+            mask.SetTo(new MCvScalar(0));
+            
+            foreach (var bbox in regions)
+            {
+                int m = 3;
+                int x = Math.Max(0, (int)bbox.Left - m), y = Math.Max(0, (int)bbox.Top - m);
+                int w = Math.Min(src.Width - x, bbox.Width + m * 2), h = Math.Min(src.Height - y, bbox.Height + m * 2);
+                if (w > 0 && h > 0) CvInvoke.Rectangle(mask, new Rectangle(x, y, w, h), new MCvScalar(255), -1);
+            }
+            
+            using var res = new Mat();
+            CvInvoke.Inpaint(src, mask, res, inpaintRadius, InpaintType.Telea);
+            return MatToBitmap(res); // Mat -> Bitmap 변환
+        }
+        
+        /// <summary>
+        /// Emgu.CV Mat 객체를 GDI+ Bitmap으로 안전하게 변환
         /// </summary>
         private static Bitmap? MatToBitmap(Mat mat)
         {
-            if (mat.IsEmpty)
-                return null;
-            
+            if (mat.IsEmpty) return null;
             try
             {
-                // BGR -> Bitmap 변환
-                var bitmap = new Bitmap(mat.Width, mat.Height, PixelFormat.Format24bppRgb);
-                var bmpData = bitmap.LockBits(
-                    new Rectangle(0, 0, bitmap.Width, bitmap.Height),
-                    ImageLockMode.WriteOnly,
-                    PixelFormat.Format24bppRgb);
+                var bmp = new Bitmap(mat.Width, mat.Height, PixelFormat.Format24bppRgb);
+                var data = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
                 
-                int bytesPerRow = mat.Width * 3; // BGR = 3 bytes per pixel
-                byte[] buffer = new byte[bytesPerRow];
+                int bpr = mat.Width * 3; // 24bpp (BGR)
+                byte[] rowBuf = new byte[bpr];
                 
                 for (int y = 0; y < mat.Height; y++)
                 {
-                    IntPtr srcRow = IntPtr.Add(mat.DataPointer, y * (int)mat.Step);
-                    IntPtr dstRow = IntPtr.Add(bmpData.Scan0, y * bmpData.Stride);
-                    
-                    // Mat에서 버퍼로 복사
-                    System.Runtime.InteropServices.Marshal.Copy(srcRow, buffer, 0, bytesPerRow);
-                    // 버퍼에서 Bitmap으로 복사
-                    System.Runtime.InteropServices.Marshal.Copy(buffer, 0, dstRow, bytesPerRow);
+                    IntPtr src = IntPtr.Add(mat.DataPointer, y * (int)mat.Step);
+                    IntPtr dst = IntPtr.Add(data.Scan0, y * data.Stride);
+                    System.Runtime.InteropServices.Marshal.Copy(src, rowBuf, 0, bpr);
+                    System.Runtime.InteropServices.Marshal.Copy(rowBuf, 0, dst, bpr);
                 }
                 
-                bitmap.UnlockBits(bmpData);
-                return bitmap;
+                bmp.UnlockBits(data);
+                return bmp;
             }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"MatToBitmap error: {ex.Message}");
-                return null;
-            }
+            catch { return null; }
         }
     }
 }

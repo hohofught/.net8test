@@ -106,7 +106,7 @@ namespace GeminiWebTranslator
                 OnChunkTranslated?.Invoke(cleaned);
             }
 
-            OnStatus?.Invoke($"✅ 완료 ({chunks.Count}청크, 평균 {_context.AverageResponseTimeMs:F0}ms)", Color.Green);
+            OnStatus?.Invoke($"[성공] 완료 ({chunks.Count}청크, 평균 {_context.AverageResponseTimeMs:F0}ms)", Color.Green);
             return results;
         }
 

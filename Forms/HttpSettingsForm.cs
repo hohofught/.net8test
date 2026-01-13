@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using PuppeteerSharp;
 using Point = System.Drawing.Point;
+using GeminiWebTranslator.Services;
 
 namespace GeminiWebTranslator.Forms
 {
@@ -33,21 +34,13 @@ namespace GeminiWebTranslator.Forms
         private readonly string _profileDir; // 브라우저 프로필 디렉토리
         
         // 경로 도우미 속성
-        private static string BasePath => Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location) ?? "";
+        private static string BasePath => AppContext.BaseDirectory;
         private static string BrowserFolder => Path.Combine(BasePath, "chrome_bin"); // 크롬 실행 파일 경로
         private static string UserDataFolder => Path.Combine(BasePath, "TopSecretProfile"); // 전용 사용자 데이터 경로
         
         // 외부 연동 이벤트
         public event Action<string>? OnLog; // 로그 메시지 전달
         public event Action<string, string>? OnCookiesUpdated; // 쿠키 정보 업데이트 알림
-        
-        // UI 색상 테마 설정 (Premium Dark Mode)
-        private readonly Color darkBg = Color.FromArgb(18, 18, 20);      // 더 깊고 현대적인 검정
-        private readonly Color darkPanel = Color.FromArgb(28, 28, 32);   // 요소용 짙은 회색
-        private readonly Color accentBlue = Color.FromArgb(60, 180, 255); // 활기찬 파랑
-        private readonly Color accentGreen = Color.FromArgb(80, 200, 120);// 에메랄드 그린
-        private readonly Color darkText = Color.FromArgb(220, 220, 220); // 부드러운 흰색
-        private readonly Color borderColor = Color.FromArgb(45, 45, 50);  // 세련된 구분선
 
         public HttpSettingsForm(string cookiePath, string profileDir)
         {
@@ -57,7 +50,7 @@ namespace GeminiWebTranslator.Forms
             this.Text = "HTTP API 및 쿠키 통합 설정";
             this.MinimizeBox = false;
             this.Size = new Size(560, 560); // 모델 선택 제거로 높이 줄임
-            this.BackColor = darkBg;
+            this.BackColor = UiTheme.ColorBackground;
             
             InitializeComponents();
             LoadExistingCookies(); 
@@ -68,14 +61,14 @@ namespace GeminiWebTranslator.Forms
         /// </summary>
         private void InitializeComponents()
         {
-            var mainPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(30), BackColor = darkBg };
+            var mainPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(30), BackColor = UiTheme.ColorBackground };
             
             // 제목 섹션
             var lblTitle = new Label
             {
                 Text = "HTTP API & 쿠키 설정",
                 Font = new Font("Segoe UI Variable Display", 18, FontStyle.Bold),
-                ForeColor = accentBlue,
+                ForeColor = UiTheme.ColorPrimary,
                 Location = new Point(30, 25),
                 AutoSize = true
             };
@@ -84,7 +77,7 @@ namespace GeminiWebTranslator.Forms
             {
                 Text = "독립 브라우저 자동 추출 또는 수동 입력을 지원합니다.",
                 Location = new Point(30, 65),
-                ForeColor = Color.FromArgb(150, 150, 150),
+                ForeColor = UiTheme.ColorTextMuted,
                 AutoSize = true,
                 Font = new Font("Segoe UI", 9.5f)
             };
@@ -95,7 +88,7 @@ namespace GeminiWebTranslator.Forms
                 Text = " 자동 추출 및 파일 로드 ",
                 Location = new Point(30, 105),
                 Size = new Size(485, 95),
-                ForeColor = accentBlue,
+                ForeColor = UiTheme.ColorPrimary,
                 Font = new Font("Segoe UI Semibold", 9)
             };
 
@@ -104,7 +97,7 @@ namespace GeminiWebTranslator.Forms
                 Text = "🚀 독립 브라우저 실행",
                 Location = new Point(15, 30),
                 Size = new Size(165, 45),
-                BackColor = accentGreen,
+                BackColor = UiTheme.ColorSuccess,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
                 Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
@@ -118,7 +111,7 @@ namespace GeminiWebTranslator.Forms
                 Text = "🔄 초기화",
                 Location = new Point(185, 30),
                 Size = new Size(80, 45),
-                BackColor = Color.FromArgb(70, 70, 75),
+                BackColor = UiTheme.ColorSurfaceLight,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
                 Font = new Font("Segoe UI", 9f),
@@ -134,7 +127,7 @@ namespace GeminiWebTranslator.Forms
                 Text = "📁 쿠키 파일 열기",
                 Location = new Point(270, 30),
                 Size = new Size(200, 45),
-                BackColor = Color.FromArgb(50, 50, 60),
+                BackColor = UiTheme.ColorSurface,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
                 Font = new Font("Segoe UI", 9.5f),
@@ -154,14 +147,14 @@ namespace GeminiWebTranslator.Forms
                 Font = new Font("Segoe UI Semibold", 9)
             };
 
-            var lblPSID = new Label { Text = "__Secure-1PSID:", Location = new Point(15, 30), AutoSize = true, ForeColor = darkText };
-            txtPSID = new TextBox { Location = new Point(15, 52), Width = 455, BackColor = darkPanel, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Consolas", 10) };
+            var lblPSID = new Label { Text = "__Secure-1PSID:", Location = new Point(15, 30), AutoSize = true, ForeColor = UiTheme.ColorText };
+            txtPSID = new TextBox { Location = new Point(15, 52), Width = 455, BackColor = UiTheme.ColorSurface, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Consolas", 10) };
             
-            var lblPSIDTS = new Label { Text = "__Secure-1PSIDTS (선택사항):", Location = new Point(15, 90), AutoSize = true, ForeColor = darkText };
-            txtPSIDTS = new TextBox { Location = new Point(15, 112), Width = 455, BackColor = darkPanel, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Consolas", 10) };
+            var lblPSIDTS = new Label { Text = "__Secure-1PSIDTS (선택사항):", Location = new Point(15, 90), AutoSize = true, ForeColor = UiTheme.ColorText };
+            txtPSIDTS = new TextBox { Location = new Point(15, 112), Width = 455, BackColor = UiTheme.ColorSurface, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Consolas", 10) };
 
-            var lblUA = new Label { Text = "User-Agent (선택사항):", Location = new Point(15, 150), AutoSize = true, ForeColor = darkText };
-            txtUserAgent = new TextBox { Location = new Point(15, 172), Width = 455, BackColor = darkPanel, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Segoe UI", 9) };
+            var lblUA = new Label { Text = "User-Agent (선택사항):", Location = new Point(15, 150), AutoSize = true, ForeColor = UiTheme.ColorText };
+            txtUserAgent = new TextBox { Location = new Point(15, 172), Width = 455, BackColor = UiTheme.ColorSurface, ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle, Font = new Font("Segoe UI", 9) };
             
             gbManual.Controls.AddRange(new Control[] { lblPSID, txtPSID, lblPSIDTS, txtPSIDTS, lblUA, txtUserAgent });
             
@@ -182,7 +175,7 @@ namespace GeminiWebTranslator.Forms
                 Text = "💾 설정 저장 및 API 적용",
                 Location = new Point(30, 485),
                 Size = new Size(320, 50),
-                BackColor = accentBlue,
+                BackColor = UiTheme.ColorPrimary,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
                 Font = new Font("Segoe UI Semibold", 11, FontStyle.Bold),
@@ -197,7 +190,7 @@ namespace GeminiWebTranslator.Forms
                 Text = "🔄 재연결",
                 Location = new Point(360, 485),
                 Size = new Size(155, 50),
-                BackColor = accentGreen,
+                BackColor = UiTheme.ColorSuccess,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
                 Font = new Font("Segoe UI Semibold", 10),
@@ -265,19 +258,19 @@ namespace GeminiWebTranslator.Forms
                     txtPSIDTS!.Text = psidts ?? "";
                     txtUserAgent!.Text = userAgent ?? "";
                     
-                    lblStatus.Text = "✅ 쿠키 추출 성공! 이제 '저장'을 눌러주세요.";
+                    lblStatus.Text = "[성공] 쿠키 추출 성공! 이제 '저장'을 눌러주세요.";
                     lblStatus.ForeColor = Color.Lime;
                     Log("[HTTP] 쿠키 추출 완료");
                 }
                 else
                 {
-                    lblStatus.Text = "❌ 쿠키를 찾을 수 없습니다. 로그인이 필요합니다.";
+                    lblStatus.Text = "[실패] 쿠키를 찾을 수 없습니다. 로그인이 필요합니다.";
                     lblStatus.ForeColor = Color.Red;
                 }
             }
             catch (Exception ex)
             {
-                lblStatus.Text = $"❌ 오류: {ex.Message}";
+                lblStatus.Text = $"[실패] 오류: {ex.Message}";
                 lblStatus.ForeColor = Color.Red;
             }
             finally
@@ -307,12 +300,12 @@ namespace GeminiWebTranslator.Forms
                     Log(msg);
                 };
                 await manager.ResetBrowserAsync();
-                lblStatus.Text = "✅ 초기화 및 재설치 완료!";
+                lblStatus.Text = "[성공] 초기화 및 재설치 완료!";
                 lblStatus.ForeColor = Color.Lime;
             }
             catch (Exception ex)
             {
-                lblStatus.Text = $"❌ 초기화 실패: {ex.Message}";
+                lblStatus.Text = $"[실패] 초기화 실패: {ex.Message}";
                 lblStatus.ForeColor = Color.Red;
             }
             finally
@@ -403,19 +396,19 @@ namespace GeminiWebTranslator.Forms
                         if (txtPSIDTS != null) txtPSIDTS.Text = json["Secure_1PSIDTS"]?.ToString() ?? json["__Secure-1PSIDTS"]?.ToString() ?? "";
                         if (txtUserAgent != null) txtUserAgent.Text = json["UserAgent"]?.ToString() ?? "";
                         
-                        lblStatus!.Text = "✅ 파일 로드 성공!";
+                        lblStatus!.Text = "[성공] 파일 로드 성공!";
                         lblStatus.ForeColor = Color.Lime;
                         Log("[HTTP] 쿠키 파일 로드됨");
                     }
                     else
                     {
-                        lblStatus!.Text = "⚠️ JSON 형식이 아닙니다.";
+                        lblStatus!.Text = "[경고] JSON 형식이 아닙니다.";
                         lblStatus.ForeColor = Color.Orange;
                     }
                 }
                 catch (Exception ex)
                 {
-                    lblStatus!.Text = $"❌ 파일 읽기 오류: {ex.Message}";
+                    lblStatus!.Text = $"[실패] 파일 읽기 오류: {ex.Message}";
                     lblStatus.ForeColor = Color.Red;
                 }
             }
@@ -468,19 +461,19 @@ namespace GeminiWebTranslator.Forms
                 if (OnReconnectRequested != null)
                 {
                     await OnReconnectRequested.Invoke();
-                    lblStatus.Text = "✅ API 재연결 성공";
-                    lblStatus.ForeColor = accentGreen;
+                    lblStatus.Text = "[성공] API 재연결 성공";
+                    lblStatus.ForeColor = UiTheme.ColorSuccess;
                     OnLog?.Invoke("[HTTP] API 재연결 성공");
                 }
                 else
                 {
-                    lblStatus.Text = "⚠️ 재연결 핸들러 없음";
+                    lblStatus.Text = "[경고] 재연결 핸들러 없음";
                     lblStatus.ForeColor = Color.Yellow;
                 }
             }
             catch (Exception ex)
             {
-                lblStatus.Text = $"❌ 재연결 실패: {ex.Message}";
+                lblStatus.Text = $"[실패] 재연결 실패: {ex.Message}";
                 lblStatus.ForeColor = Color.Red;
                 OnLog?.Invoke($"[HTTP] API 재연결 실패: {ex.Message}");
             }

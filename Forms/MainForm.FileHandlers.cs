@@ -67,7 +67,7 @@ public partial class MainForm
                     if (promptForm.ShowDialog() == DialogResult.OK)
                     {
                         CustomTranslationPrompt = promptForm.GeneratedPrompt;
-                        UpdateStatus("✅ 커스텀 프롬프트 설정됨", Color.LightGreen);
+                        UpdateStatus("[성공] 커스텀 프롬프트 설정됨", Color.LightGreen);
                         AppendLog($"[Info] 커스텀 프롬프트 적용됨: {CustomTranslationPrompt.Substring(0, Math.Min(50, CustomTranslationPrompt.Length))}...");
                     }
                 }
@@ -116,9 +116,9 @@ public partial class MainForm
                 await ProcessTsvBatchTranslationAsync(targetLang, style); 
             }
             btnSaveFile.Enabled = true;
-            UpdateStatus("✅ 파일 번역 완료", Color.Green);
+            UpdateStatus("[성공] 파일 번역 완료", Color.Green);
         }
-        catch (Exception ex) { txtOutput.Text += $"\n\n오류: {ex.Message}"; UpdateStatus("❌ 오류", Color.Red); throw; }
+        catch (Exception ex) { txtOutput.Text += $"\n\n오류: {ex.Message}"; UpdateStatus("[실패] 오류", Color.Red); throw; }
     }
 
     private async Task ProcessTsvBatchTranslationAsync(string targetLang, string style)
@@ -246,7 +246,7 @@ public partial class MainForm
             savedItemsToTranslate = null;
             lastBatchIndex = 0;
             
-            txtOutput.Text = $"✅ 완료: {state.Results.Count}개\n--- 미리보기 ---\n" + 
+            txtOutput.Text = $"[성공] 완료: {state.Results.Count}개\n--- 미리보기 ---\n" + 
                 string.Join("\n", loadedTsvLines.Skip(1).Take(20).Select(l => l.Length > 50 ? l.Substring(0, 50)+"..." : l));
         }
         catch (OperationCanceledException) 

@@ -661,6 +661,40 @@ public class GeminiAutomation : IGeminiAutomation
             var errorCheck = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.DiagnoseErrorScript);
             diagnostics.ErrorMessage = errorCheck != null ? errorCheck.Trim('"') : "";
             
+            // 이미지 기능 사용 가능 여부 진단
+            try
+            {
+                var imageCapCheck = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.DiagnoseImageCapabilityScript);
+                if (!string.IsNullOrEmpty(imageCapCheck) && imageCapCheck != "null")
+                {
+                    var jsonStr = imageCapCheck.Trim('"').Replace("\\\"", "\"").Replace("\\\\", "\\");
+                    // 간단한 JSON 파싱 (Newtonsoft 의존성 없이)
+                    if (jsonStr.Contains("\"available\":false") || jsonStr.Contains("\"loginRequired\":true"))
+                    {
+                        diagnostics.ImageCapabilityAvailable = false;
+                        // errorMessage 추출
+                        var errStart = jsonStr.IndexOf("\"errorMessage\":\"");
+                        if (errStart >= 0)
+                        {
+                            errStart += "\"errorMessage\":\"".Length;
+                            var errEnd = jsonStr.IndexOf("\"", errStart);
+                            if (errEnd > errStart)
+                            {
+                                diagnostics.ImageErrorMessage = jsonStr.Substring(errStart, errEnd - errStart);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        diagnostics.ImageCapabilityAvailable = true;
+                    }
+                }
+            }
+            catch
+            {
+                // 이미지 진단 실패 시 기본값 유지
+            }
+            
             // 특수 오류 처리 (문자가 포함된 경우 Error로 강제 전환)
             if (diagnostics.ErrorMessage.Contains("문제가 발생") || 
                 diagnostics.ErrorMessage.Contains("Something went wrong") ||

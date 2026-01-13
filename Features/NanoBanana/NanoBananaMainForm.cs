@@ -47,7 +47,7 @@ public partial class NanoBananaMainForm : Form
         _progress = NanoBananaProgress.Load();
         
         InitializeComponent(); // From Designer
-        ApplyTheme();
+        UiTheme.ApplyTheme(this);
         InitializeEvents();
         LoadSettings();
         
@@ -345,93 +345,7 @@ public partial class NanoBananaMainForm : Form
     }
 
 
-    private void ApplyTheme()
-    {
-        var deepCharcoal = Color.FromArgb(15, 15, 18);
-        var surfaceDark = Color.FromArgb(24, 24, 28);
-        var purpleAccent = Color.FromArgb(124, 77, 255);
-        var softWhite = Color.FromArgb(224, 224, 224);
-        var mutedText = Color.FromArgb(150, 150, 160);
-        var borderColor = Color.FromArgb(45, 45, 50);
 
-        this.BackColor = deepCharcoal;
-        this.ForeColor = softWhite;
-
-        void UpdateControlTheme(Control c)
-        {
-            if (c is Panel p)
-            {
-                p.BackColor = Color.Transparent; // Panels often just containers
-            }
-            else if (c is GroupBox grp)
-            {
-                grp.BackColor = surfaceDark;
-                grp.ForeColor = purpleAccent;
-                grp.Font = new Font("Segoe UI Semibold", 9.5F);
-            }
-            else if (c is Button btn)
-            {
-                // Logic-dependent button colors
-                if (btn.Name == "btnStart") {
-                    btn.BackColor = Color.FromArgb(46, 160, 67); // Success Green
-                    btn.ForeColor = Color.White;
-                }
-                else if (btn.Name == "btnStop") {
-                    btn.BackColor = Color.FromArgb(207, 34, 46); // Error Red
-                    btn.ForeColor = Color.White;
-                }
-                else if (btn.Name == "btnLaunchIsolated") {
-                    btn.BackColor = purpleAccent;
-                    btn.ForeColor = Color.White;
-                }
-                else {
-                    btn.BackColor = Color.FromArgb(40, 40, 45);
-                    btn.ForeColor = softWhite;
-                }
-                
-                btn.FlatStyle = FlatStyle.Flat;
-                btn.FlatAppearance.BorderColor = borderColor;
-                btn.FlatAppearance.BorderSize = 1;
-                btn.Cursor = Cursors.Hand;
-            }
-            else if (c is TextBox txt)
-            {
-                txt.BackColor = Color.FromArgb(32, 32, 36);
-                txt.ForeColor = Color.White;
-                txt.BorderStyle = BorderStyle.FixedSingle;
-                txt.Font = new Font("Segoe UI", 9F);
-            }
-            else if (c is Label lbl)
-            {
-                if (lbl.Name.StartsWith("lblProgress")) lbl.ForeColor = purpleAccent;
-                else lbl.ForeColor = softWhite;
-            }
-            else if (c is DataGridView dgv)
-            {
-                dgv.BackgroundColor = surfaceDark;
-                dgv.GridColor = borderColor;
-                dgv.BorderStyle = BorderStyle.None;
-                dgv.DefaultCellStyle.BackColor = surfaceDark;
-                dgv.DefaultCellStyle.ForeColor = softWhite;
-                dgv.DefaultCellStyle.SelectionBackColor = Color.FromArgb(50, 50, 60);
-                dgv.DefaultCellStyle.SelectionForeColor = purpleAccent;
-                dgv.EnableHeadersVisualStyles = false;
-                dgv.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(30, 30, 35);
-                dgv.ColumnHeadersDefaultCellStyle.ForeColor = softWhite;
-                dgv.ColumnHeadersDefaultCellStyle.Padding = new Padding(5, 5, 5, 5);
-                dgv.RowHeadersVisible = false;
-            }
-            else if (c is ProgressBar pb)
-            {
-                // Note: WinForms ProgressBar theming is limited without owner-draw
-                pb.BackColor = Color.FromArgb(40, 40, 45);
-            }
-
-            foreach (Control child in c.Controls) UpdateControlTheme(child);
-        }
-
-        foreach (Control c in this.Controls) UpdateControlTheme(c);
-    }
 
     private void InitializeEvents()
     {
@@ -485,13 +399,13 @@ public partial class NanoBananaMainForm : Form
     }
 
     /// <summary>오류 로그</summary>
-    private void AppendLogError(string msg) => AppendLog($"❌ {msg}");
+    private void AppendLogError(string msg) => AppendLog($"[실패] {msg}");
     
     /// <summary>경고 로그</summary>
-    private void AppendLogWarning(string msg) => AppendLog($"⚠️ {msg}");
+    private void AppendLogWarning(string msg) => AppendLog($"[경고] {msg}");
     
     /// <summary>성공 로그</summary>
-    private void AppendLogSuccess(string msg) => AppendLog($"✅ {msg}");
+    private void AppendLogSuccess(string msg) => AppendLog($"[성공] {msg}");
     
     #endregion
     
@@ -544,7 +458,7 @@ public partial class NanoBananaMainForm : Form
             foreach (var file in files)
             {
                 var filename = Path.GetFileName(file);
-                var status = _progress.IsProcessed(filename) ? "✓ 완료" : "대기";
+                var status = _progress.IsProcessed(filename) ? "[성공] 완료" : "대기";
                 dgvImages.Rows.Add(filename, status);
             }
         }
@@ -626,58 +540,67 @@ public partial class NanoBananaMainForm : Form
             browserState.ActiveBrowser == null || 
             browserState.ActiveBrowser.IsClosed)
         {
-            AppendLogWarning("⚠️ 브라우저가 실행되지 않았습니다.");
+            AppendLog("브라우저가 실행되지 않았습니다. 자동으로 시작합니다...");
             
-            var result = MessageBox.Show(
-                "브라우저가 실행되지 않았습니다.\n\n지금 브라우저를 시작하고 처리를 진행하시겠습니까?",
-                "브라우저 필요",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning);
-            
-            if (result == DialogResult.Yes)
+            btnStart.Enabled = false;
+            try
             {
-                AppendLog("브라우저 자동 시작 중...");
-                
-                // 브라우저 시작 버튼의 로직 호출
-                btnStart.Enabled = false;
-                try
+                // GlobalBrowserState를 통해 브라우저 획득 (BtnLaunchBrowser_Click과 동일한 방식)
+                if (!browserState.CanAcquire(BrowserOwner.NanoBanana))
                 {
-                    // IsolatedBrowserManager 초기화
-                    if (_isolatedBrowserManager == null)
-                    {
-                        _isolatedBrowserManager = new IsolatedBrowserManager();
-                        _isolatedBrowserManager.OnStatusUpdate += msg => AppendLog($"[Browser] {msg}");
-                    }
-                    
-                    // 브라우저 준비 및 실행
-                    await _isolatedBrowserManager.PrepareBrowserAsync();
-                    var browser = await _isolatedBrowserManager.LaunchBrowserAsync(headless: false);
-                    
-                    if (browser == null)
-                    {
-                        AppendLogError("브라우저 시작 실패. 수동으로 'Chrome 실행/설치' 버튼을 클릭해주세요.");
-                        btnStart.Enabled = true;
-                        return;
-                    }
-                    
-                    // GlobalBrowserState에 소유권 등록
-                    await browserState.AcquireBrowserAsync(BrowserOwner.NanoBanana, headless: false, forceRelease: true);
-                    
-                    AppendLogSuccess("브라우저가 시작되었습니다. 처리를 계속합니다...");
-                    
-                    // 잠시 대기 후 계속 진행
-                    await Task.Delay(2000);
-                }
-                catch (Exception ex)
-                {
-                    AppendLogError($"브라우저 시작 오류: {ex.Message}");
+                    var currentOwner = browserState.CurrentOwner;
+                    AppendLogError($"브라우저가 {currentOwner}에서 사용 중입니다. MainForm의 브라우저 모드를 먼저 종료하세요.");
                     btnStart.Enabled = true;
                     return;
                 }
+                
+                // GlobalBrowserState를 통해 브라우저 획득
+                if (!await browserState.AcquireBrowserAsync(BrowserOwner.NanoBanana, headless: false))
+                {
+                    AppendLogError("브라우저 획득 실패. 수동으로 'Chrome 실행/설치' 버튼을 클릭해주세요.");
+                    btnStart.Enabled = true;
+                    return;
+                }
+                
+                var browser = browserState.ActiveBrowser;
+                if (browser == null)
+                {
+                    AppendLogError("브라우저 인스턴스가 null입니다.");
+                    btnStart.Enabled = true;
+                    return;
+                }
+                
+                AppendLogSuccess("브라우저 실행 완료!");
+                
+                // EdgeCdpAutomation 생성 및 연결
+                if (_edgeCdpAutomation != null)
+                {
+                    _edgeCdpAutomation.OnLog -= AppendLogWrapper;
+                    _edgeCdpAutomation.Dispose();
+                }
+                
+                _edgeCdpAutomation = new EdgeCdpAutomation();
+                _edgeCdpAutomation.OnLog += AppendLogWrapper;
+                
+                if (await _edgeCdpAutomation.ConnectWithBrowserAsync(browser))
+                {
+                    _automation = _edgeCdpAutomation;
+                    AppendLogSuccess("자동화 연결 성공! 처리를 시작합니다...");
+                }
+                else
+                {
+                    AppendLogError("자동화 연결 실패. Gemini 페이지 로딩을 기다려주세요.");
+                    btnStart.Enabled = true;
+                    return;
+                }
+                
+                // 페이지 로드 대기
+                await Task.Delay(2000);
             }
-            else
+            catch (Exception ex)
             {
-                AppendLog("처리가 취소되었습니다. 먼저 'Chrome 실행/설치'를 클릭해주세요.");
+                AppendLogError($"브라우저 시작 오류: {ex.Message}");
+                btnStart.Enabled = true;
                 return;
             }
         }
@@ -952,13 +875,13 @@ public partial class NanoBananaMainForm : Form
             if (success)
             {
                 _progress.MarkProcessed(filename);
-                UpdateImageStatus(filename, "✓ 완료");
-                AppendLog($"  ✓ 완료");
+                UpdateImageStatus(filename, "[성공] 완료");
+                AppendLog($"  [성공] 완료");
             }
             else
             {
-                UpdateImageStatus(filename, "❌ 실패");
-                AppendLog($"  ❌ 실패");
+                UpdateImageStatus(filename, "[실패] 실패");
+                AppendLog($"  [실패] 실패");
             }
             
             processed++;
@@ -997,83 +920,66 @@ public partial class NanoBananaMainForm : Form
         var filename = Path.GetFileName(imagePath);
         
         // 1. 새 채팅 시작
+        // 1. 새 채팅 시작 및 브라우저 준비
         await _edgeCdpAutomation.StartNewChatAsync();
         ct.ThrowIfCancellationRequested();
         
-        // 2. 프롬프트 준비 (OCR 포함 전체 프롬프트 & 단순 프롬프트)
+        // 2. OCR 준비 (Gemini 보조 모드일 경우 실행)
         string? ocrText = null;
-        
         if (chkGeminiOcrAssist.Checked)
         {
             UpdateImageStatus(filename, "OCR 분석 중...");
             AppendLog($"  OCR 분석 중...");
             ocrText = await _ocrService.ExtractTextAsync(imagePath);
+            
             if (!string.IsNullOrWhiteSpace(ocrText))
             {
-                var shortText = ocrText.Replace("\n", " ").Length > 50 
-                    ? ocrText.Replace("\n", " ").Substring(0, 50) + "..." 
-                    : ocrText.Replace("\n", " ");
+                var shortText = ocrText.Replace("\n", " ");
+                if (shortText.Length > 50) shortText = shortText.Substring(0, 50) + "...";
                 AppendLog($"  [OCR] 텍스트 감지: {shortText}");
             }
             else
             {
                 AppendLog($"  [OCR] 텍스트 없음");
-                ocrText = null;
             }
         }
         
-        // 전체 프롬프트 (OCR 포함)
+        // 3. 최종 프롬프트 구성 (OCR 텍스트 포함)
         var fullPrompt = _config.BuildPrompt(ocrText) ?? _config.Prompt;
+        var simplePrompt = _config.Prompt; // 실패 시를 대비한 백업 프롬프트
         
-        // 단순 프롬프트 (OCR 없음) - 폴백용
-        var simplePrompt = _config.Prompt;
-        
-        // [OCR 검증] 프롬프트에 OCR 텍스트 포함 여부 확인
+        // 프롬프트 치환 검증 로그
         if (!string.IsNullOrWhiteSpace(ocrText))
         {
-            var containsOcr = fullPrompt.Contains(ocrText) || fullPrompt.Contains("Context - The following text");
-            AppendLog($"  [OCR 검증] 프롬프트에 OCR 텍스트 포함: {(containsOcr ? "✓ 예" : "❌ 아니오")}");
-            if (_config.UsePromptTemplate)
-            {
-                var hasPlaceholder = fullPrompt.Contains("{ocr_text}");
-                AppendLog($"  [OCR 검증] {{ocr_text}} 플레이스홀더 치환: {(hasPlaceholder ? "❌ 미치환" : "✓ 치환됨")}");
-            }
-            AppendLog($"  [프롬프트 길이] 전체: {fullPrompt.Length}자 / 단순: {simplePrompt.Length}자");
+            var hasP = fullPrompt.Contains("{ocr_text}");
+            AppendLog($"  [OCR 검증] {(_config.UsePromptTemplate ? (hasP ? "[실패] 미치환" : "[성공] 치환됨") : "[성공] 하단에 추가됨")}");
         }
         
         UpdateImageStatus(filename, "자동 처리 중...");
         
-        // 3. 향상된 워크플로우 실행 (지능형 재시도 + 프롬프트 폴백 포함)
+        // 4. 지능형 워크플로우 실행 (업로드 -> 전송 -> 결과 대기 -> 필요시 재시도)
         var (success, resultBase64) = await _edgeCdpAutomation.RunFullWorkflowWithRetryAsync(
             imagePath, 
             fullPrompt,
             simplePrompt,
             useProMode: chkProMode.Checked,
-            deleteOnSuccess: true // 성공 시 자동으로 채팅 삭제
+            deleteOnSuccess: true // 성공 시 채팅 목록 정리를 위해 자동 삭제
         );
         
         ct.ThrowIfCancellationRequested();
+        if (!success) return false;
         
-        if (!success)
-        {
-            return false;
-        }
-        
-        // 4. 결과 이미지 저장
+        // 5. 결과 저장 (Base64 직접 추출이 우선, 안되면 브라우저 다운로드 시도)
         if (!string.IsNullOrEmpty(resultBase64))
         {
             var outputFilename = $"{Path.GetFileNameWithoutExtension(filename)}_result.png";
             var outputPath = Path.Combine(txtOutputFolder.Text, outputFilename);
-            
             if (await _edgeCdpAutomation.SaveBase64ImageAsync(resultBase64, outputPath))
-            {
                 AppendLogSuccess($"  결과 저장됨: {outputFilename}");
-            }
         }
         else
         {
-            // Base64 추출 실패 시 기존 다운로드 방식 시도
-            AppendLogWarning($"  브라우저 다운로드 실행...");
+            AppendLogWarning($"  Base64 추출 실패, 브라우저 다운로드 모드로 전환...");
             await _edgeCdpAutomation.DownloadResultImageAsync();
         }
         
@@ -1087,27 +993,17 @@ public partial class NanoBananaMainForm : Form
     {
         if (_automation == null) return false;
         
-        // 1. 새 채팅 시작
+        // 1. 초기 환경 설정
         await _automation.StartNewChatAsync();
         ct.ThrowIfCancellationRequested();
         
-        // 2. Pro 모드 설정
-        if (chkProMode.Checked)
-            await _automation.SelectProModeAsync();
+        if (chkProMode.Checked) await _automation.SelectProModeAsync();
+        if (chkImageGen.Checked) await _automation.EnableImageGenerationAsync();
         
-        // 3. 이미지 생성 모드 설정
-        if (chkImageGen.Checked)
-            await _automation.EnableImageGenerationAsync();
-        
-        // 4. 이미지 업로드 시작
+        // 2. 이미지 업로드 (JS 전담 스크립트 실행)
         UpdateImageStatus(Path.GetFileName(imagePath), "이미지 업로드 중...");
-        if (!await _automation.UploadImageAsync(imagePath))
-        {
-            AppendLog("  이미지 업로드 실패");
-            return false;
-        }
+        if (!await _automation.UploadImageAsync(imagePath)) return false;
         
-        // 5. 업로드 완료 대기
         if (!await _automation.WaitForImageUploadAsync(120))
         {
             AppendLog("  이미지 업로드 타임아웃");
@@ -1115,54 +1011,40 @@ public partial class NanoBananaMainForm : Form
         }
         ct.ThrowIfCancellationRequested();
         
-        // 6. 프롬프트 전송 ({ocr_text} 플레이스홀더 사용)
-        var currentPrompt = txtPrompt.Text;
-
+        // 3. 프롬프트 치환 및 전송
+        string currentPrompt;
         if (chkGeminiOcrAssist.Checked)
         {
             UpdateImageStatus(Path.GetFileName(imagePath), "OCR 분석 중...");
-            AppendLog($"  OCR 분석 중...");
             var ocrText = await _ocrService.ExtractTextAsync(imagePath);
+            
+            // 중앙 집중식 프롬프트 빌더 사용
+            currentPrompt = _config.BuildPrompt(ocrText);
+            
             if (!string.IsNullOrWhiteSpace(ocrText))
             {
-                var shortText = ocrText.Replace("\n", " ").Length > 50 ? ocrText.Replace("\n", " ").Substring(0, 50) + "..." : ocrText.Replace("\n", " ");
-                AppendLog($"  [OCR] 텍스트 감지: {shortText}");
-                
-                // {ocr_text} 플레이스홀더 치환
-                if (currentPrompt.Contains("{ocr_text}"))
-                {
-                    currentPrompt = currentPrompt.Replace("{ocr_text}", ocrText);
-                    AppendLog($"  [OCR] {{ocr_text}} 플레이스홀더에 OCR 텍스트 대입됨");
-                }
-                else
-                {
-                    // 플레이스홀더가 없으면 끝에 추가 (호환성)
-                    currentPrompt += $"\n\nContext - The following text exists in the image and must be removed/cleaned: {ocrText}";
-                    AppendLog($"  [OCR] 프롬프트 끝에 OCR 텍스트 추가됨 ({{ocr_text}} 플레이스홀더 없음)");
-                }
+                var shortText = ocrText.Length > 20 ? ocrText.Substring(0, 20) + "..." : ocrText;
+                AppendLog($"  [OCR] 텍스트 감지됨: {shortText.Replace("\n", " ")}");
             }
             else
             {
-                AppendLog($"  [OCR] 텍스트 없음");
-                // OCR 텍스트 없으면 {ocr_text} 플레이스홀더 제거
-                currentPrompt = currentPrompt.Replace("{ocr_text}", "");
+                AppendLog("  [OCR] 텍스트 없음 (프롬프트에서 태그 제거됨)");
             }
+            
             UpdateImageStatus(Path.GetFileName(imagePath), "처리 중...");
         }
-
-        if (!await _automation.SendMessageAsync(currentPrompt))
-            return false;
-        
-        // 7. 응답 대기
-        var response = await _automation.WaitForResponseAsync(_config.ResponseTimeout);
-        if (string.IsNullOrEmpty(response))
+        else
         {
-            AppendLog("  응답 없음");
-            return false;
+             currentPrompt = _config.BuildPrompt(null);
         }
-        ct.ThrowIfCancellationRequested();
+
+        if (!await _automation.SendMessageAsync(currentPrompt)) return false;
         
-        // 8. 결과 다운로드
+        // 4. 응답 대기 및 다운로드
+        var response = await _automation.WaitForResponseAsync(_config.ResponseTimeout);
+        if (string.IsNullOrEmpty(response)) return false;
+        
+        ct.ThrowIfCancellationRequested();
         await _automation.DownloadResultImageAsync();
         
         return true;
