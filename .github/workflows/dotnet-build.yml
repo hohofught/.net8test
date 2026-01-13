@@ -13,17 +13,7 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      matrix:
-        include:
-          - os: windows-latest
-            runtime: win-x64
-            artifact_name: GeminiWebTranslator_Windows
-          - os: macos-latest
-            runtime: osx-x64
-            artifact_name: GeminiWebTranslator_Mac
-    
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
 
     steps:
     - uses: actions/checkout@v3
@@ -37,21 +27,16 @@ jobs:
       run: dotnet restore
 
     - name: Publish Standalone
-      run: dotnet publish -c Release -r ${{ matrix.runtime }} --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o ./publish
+      run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o ./publish
 
-    - name: Zip Release (Windows)
-      if: matrix.os == 'windows-latest'
-      run: Compress-Archive -Path ./publish/* -DestinationPath ./${{ matrix.artifact_name }}.zip
-
-    - name: Zip Release (Mac)
-      if: matrix.os == 'macos-latest'
-      run: zip -r ./${{ matrix.artifact_name }}.zip ./publish/*
+    - name: Zip Release
+      run: Compress-Archive -Path ./publish/* -DestinationPath ./GeminiWebTranslator_Windows.zip
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.artifact_name }}
-        path: ./${{ matrix.artifact_name }}.zip
+        name: GeminiWebTranslator_Windows
+        path: ./GeminiWebTranslator_Windows.zip
 
   release:
     needs: build
@@ -62,11 +47,6 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         name: GeminiWebTranslator_Windows
-
-    - name: Download Mac Artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: GeminiWebTranslator_Mac
 
     - name: Generate Version
       id: version
@@ -85,12 +65,10 @@ jobs:
         body: |
           ## 자동 릴리즈
           - **Windows**: GeminiWebTranslator_Windows.zip
-          - **Mac**: GeminiWebTranslator_Mac.zip
           
           커밋: ${{ github.sha }}
         files: |
           GeminiWebTranslator_Windows.zip
-          GeminiWebTranslator_Mac.zip
         draft: false
         prerelease: false
       env:
