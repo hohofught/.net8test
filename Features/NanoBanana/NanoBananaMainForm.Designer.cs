@@ -305,15 +305,21 @@ partial class NanoBananaMainForm
         this.chkImageGen.ForeColor = System.Drawing.Color.White;
         this.chkImageGen.Margin = new System.Windows.Forms.Padding(0, 5, 15, 0);
         
-        this.chkUseOcr = new System.Windows.Forms.CheckBox();
-        this.chkUseOcr.Text = "OCR 사용";
-        this.chkUseOcr.AutoSize = true;
-        this.chkUseOcr.ForeColor = System.Drawing.Color.White;
-        this.chkUseOcr.Checked = true;
-        this.chkUseOcr.Margin = new System.Windows.Forms.Padding(0, 5, 15, 0);
-
+        this.chkGeminiOcrAssist = new System.Windows.Forms.CheckBox();
+        this.chkGeminiOcrAssist.Text = "Gemini OCR 보조";
+        this.chkGeminiOcrAssist.AutoSize = true;
+        this.chkGeminiOcrAssist.ForeColor = System.Drawing.Color.White;
+        this.chkGeminiOcrAssist.Checked = true;
+        this.chkGeminiOcrAssist.Margin = new System.Windows.Forms.Padding(0, 5, 15, 0);
         
-        this.flowOptions.Controls.AddRange(new System.Windows.Forms.Control[] { this.chkProMode, this.chkImageGen, this.chkUseOcr });
+        this.chkLocalOcrRemoval = new System.Windows.Forms.CheckBox();
+        this.chkLocalOcrRemoval.Text = "🧪 OCR 로컬 제거";
+        this.chkLocalOcrRemoval.AutoSize = true;
+        this.chkLocalOcrRemoval.ForeColor = System.Drawing.Color.FromArgb(255, 200, 100);  // 실험적 표시 (주황색)
+        this.chkLocalOcrRemoval.Checked = false;
+        this.chkLocalOcrRemoval.Margin = new System.Windows.Forms.Padding(0, 5, 15, 0);
+        
+        this.flowOptions.Controls.AddRange(new System.Windows.Forms.Control[] { this.chkProMode, this.chkImageGen, this.chkGeminiOcrAssist, this.chkLocalOcrRemoval });
         this.layoutSettings.Controls.Add(new System.Windows.Forms.Label { Text = "옵션:", TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill }, 0, 3);
         this.layoutSettings.Controls.Add(this.flowOptions, 1, 3);
         this.layoutSettings.SetColumnSpan(this.flowOptions, 2);
@@ -441,7 +447,8 @@ partial class NanoBananaMainForm
     
     private System.Windows.Forms.CheckBox chkProMode;
     private System.Windows.Forms.CheckBox chkImageGen;
-    private System.Windows.Forms.CheckBox chkUseOcr;
+    private System.Windows.Forms.CheckBox chkGeminiOcrAssist;
+    private System.Windows.Forms.CheckBox chkLocalOcrRemoval;
     private System.Windows.Forms.Button btnLaunchIsolated;
     private System.Windows.Forms.Button btnHideBrowser;
     

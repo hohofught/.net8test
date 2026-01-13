@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace GeminiWebTranslator.Services
@@ -54,6 +56,26 @@ namespace GeminiWebTranslator.Services
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         private static extern void ReleaseOcrResult(long result);
 
+        // 바운딩 박스 함수 (워터마크 제거용)
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern long GetOcrLineBoundingBox(long lineHandle, out IntPtr bboxPtr);
+        
+        /// <summary>
+        /// OCR 바운딩 박스 (텍스트 영역 좌표)
+        /// </summary>
+        public struct OcrBoundingBox
+        {
+            public float Left { get; set; }
+            public float Top { get; set; }
+            public float Right { get; set; }
+            public float Bottom { get; set; }
+            
+            public int Width => (int)(Right - Left);
+            public int Height => (int)(Bottom - Top);
+            public System.Drawing.Rectangle ToRectangle() => new System.Drawing.Rectangle(
+                (int)Left, (int)Top, Width, Height);
+        }
+
         #endregion
 
         // Model Key from python script
@@ -65,6 +87,28 @@ namespace GeminiWebTranslator.Services
         private volatile bool _isInitialized = false;
         private volatile bool _initFailed = false; // 영구적 실패 상태
         private static readonly SemaphoreSlim _initLock = new SemaphoreSlim(1, 1);
+
+        #region Cache Infrastructure
+        
+        // 캐시 설정 상수
+        private const int MaxCacheEntries = 500;       // 최대 500개 항목
+        private const long MaxCacheSizeBytes = 50 * 1024 * 1024; // 최대 50MB
+        
+        // LRU 캐시 구조
+        private readonly Dictionary<string, OcrCacheEntry> _cache = new();
+        private readonly LinkedList<string> _lruOrder = new();
+        private readonly object _cacheLock = new object();
+        private long _currentCacheSizeBytes = 0;
+        
+        private class OcrCacheEntry
+        {
+            public string Text { get; set; } = string.Empty;
+            public long SizeBytes { get; set; }
+            public DateTime CreatedAt { get; set; }
+            public LinkedListNode<string>? LruNode { get; set; }
+        }
+        
+        #endregion
 
         // Native 라이브러리 사전 로드 검증용
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -160,21 +204,24 @@ namespace GeminiWebTranslator.Services
             if (!_isInitialized) 
                 if (!await InitializeAsync()) return "";
 
-            return await Task.Run(() =>
+            // 캐시 확인
+            var cacheKey = GetCacheKey(imagePath);
+            var cached = GetFromCache(cacheKey);
+            if (cached != null)
+                return cached;
+
+            var result = await Task.Run(() =>
             {
                 try
                 {
                     using var bmp = new System.Drawing.Bitmap(imagePath);
                     var data = bmp.LockBits(new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height), 
                         System.Drawing.Imaging.ImageLockMode.ReadOnly, 
-                        System.Drawing.Imaging.PixelFormat.Format32bppArgb); // standard for windows generic
+                        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
 
-                    // oneocr expects 32bpp likely (Check Python script: transforms to BGRA).
-                    // Windows Bitmap 32bppArgb is BGRA (little endian).
-                    
                     var imgStruct = new ImageStructure
                     {
-                        type = 3, // 3 matches Python script (which inferred BGRA?) Script said 3.
+                        type = 3,
                         width = bmp.Width,
                         height = bmp.Height,
                         step_size = data.Stride,
@@ -200,15 +247,15 @@ namespace GeminiWebTranslator.Services
                         string? line = Marshal.PtrToStringUTF8(ptr);
                         if (!string.IsNullOrWhiteSpace(line))
                         {
-                            // 워터마크 필터링 (옵션)
+                            // 워터마크 필터링 (Python과 동일)
                             if (filterWatermarks && IsWatermark(line))
                                 continue;
                             
-                            // CJK 텍스트 추출 (중국어, 일본어, 한국어 모두 포함)
-                            var cjkText = ExtractCjkText(line);
-                            if (!string.IsNullOrEmpty(cjkText))
+                            // 중국어 텍스트만 추출 (Python과 동일)
+                            var chineseText = ExtractChineseOnly(line);
+                            if (!string.IsNullOrEmpty(chineseText))
                             {
-                                lines.Add(cjkText);
+                                lines.Add(chineseText);
                             }
                         }
                     }
@@ -222,6 +269,12 @@ namespace GeminiWebTranslator.Services
                     return "";
                 }
             });
+
+            // 캐시에 저장
+            if (!string.IsNullOrEmpty(result))
+                AddToCache(cacheKey, result);
+
+            return result;
         }
 
         /// <summary>
@@ -346,97 +399,499 @@ namespace GeminiWebTranslator.Services
         }
 
         /// <summary>
-        /// CJK 텍스트 추출 (중국어, 일본어, 한국어 모두 포함)
-        /// 노이즈 필터링 포함: 반복 문자, 순수 기호, 짧은 텍스트 제거
+        /// 중국어 문자만 추출 (Python ocr_engine.py의 _extract_chinese_only 포팅)
+        /// 영어, 숫자, 특수문자, 일본어, 한국어 제외
         /// </summary>
-        private static string ExtractCjkText(string text)
+        private static string ExtractChineseOnly(string text)
         {
-            var cjkChars = new StringBuilder();
+            var chineseChars = new StringBuilder();
             
             foreach (char c in text)
             {
-                // CJK 통합 한자: U+4E00-U+9FFF (중국어, 일본어 칸지)
+                // 중국어 유니코드 범위 (Python과 동일)
+                // CJK 통합 한자: U+4E00-U+9FFF
                 // CJK 확장 A: U+3400-U+4DBF
                 // CJK 호환 한자: U+F900-U+FAFF
-                // 한글 음절: U+AC00-U+D7AF
-                // 한글 자모: U+1100-U+11FF
-                // 히라가나: U+3040-U+309F
-                // 가타카나: U+30A0-U+30FF
+                // 한국어(\uAC00-\uD7AF), 일본어 히라가나/카타카나 제외
                 if ((c >= '\u4E00' && c <= '\u9FFF') ||  // CJK 통합 한자
                     (c >= '\u3400' && c <= '\u4DBF') ||  // CJK 확장 A
-                    (c >= '\uF900' && c <= '\uFAFF') ||  // CJK 호환 한자
-                    (c >= '\uAC00' && c <= '\uD7AF') ||  // 한글 음절
-                    (c >= '\u1100' && c <= '\u11FF') ||  // 한글 자모
-                    (c >= '\u3040' && c <= '\u309F') ||  // 히라가나
-                    (c >= '\u30A0' && c <= '\u30FF'))    // 가타카나
+                    (c >= '\uF900' && c <= '\uFAFF'))    // CJK 호환 한자
                 {
-                    cjkChars.Append(c);
+                    chineseChars.Append(c);
                 }
             }
 
-            var result = cjkChars.ToString();
+            var result = chineseChars.ToString();
             
-            // 최소 2글자 이상의 CJK 텍스트가 있어야 함
+            // 최소 2글자 이상의 중국어가 있어야 함 (Python과 동일)
             if (result.Length < 2)
-                return "";
-            
-            // 노이즈 필터링: 같은 문자가 반복되는 경우 제외
-            if (IsRepeatedCharacter(result))
-                return "";
-            
-            // 노이즈 필터링: 의미없는 단일/이중 문자 패턴 제외
-            if (result.Length <= 3 && IsNoisePattern(result))
                 return "";
 
             return result;
         }
-        
-        /// <summary>
-        /// 같은 문자가 반복되는지 확인 (예: "一一一", "啊啊啊")
-        /// </summary>
-        private static bool IsRepeatedCharacter(string text)
-        {
-            if (string.IsNullOrEmpty(text) || text.Length < 2)
-                return false;
-            
-            char first = text[0];
-            for (int i = 1; i < text.Length; i++)
-            {
-                if (text[i] != first)
-                    return false;
-            }
-            return true;
-        }
-        
-        /// <summary>
-        /// 의미없는 노이즈 패턴인지 확인 (OCR 오인식 패턴)
-        /// </summary>
-        private static bool IsNoisePattern(string text)
-        {
-            // 자주 오인식되는 단일/이중 문자 패턴
-            string[] noisePatterns = {
-                "一", "二", "三", "口", "日", "目", "田", "回",
-                "工", "土", "王", "干", "于", "士", "上", "下",
-                "十", "卜", "人", "入", "八", "力", "刀", "又",
-                "几", "凡", "刃", "丁", "了", "子", "小", "大"
-            };
-            
-            foreach (var pattern in noisePatterns)
-            {
-                if (text == pattern)
-                    return true;
-            }
-            
-            return false;
-        }
 
+        #region Cache Methods
+        
         /// <summary>
-        /// 중국어 문자만 추출 (호환성을 위해 유지)
+        /// 캐시 키 생성 (파일 경로 + 크기 + 수정 시간)
         /// </summary>
-        [Obsolete("Use ExtractCjkText instead")]
-        private static string ExtractChineseOnly(string text)
+        private static string GetCacheKey(string imagePath)
         {
-            return ExtractCjkText(text);
+            try
+            {
+                var fileInfo = new FileInfo(imagePath);
+                return $"{imagePath}|{fileInfo.Length}|{fileInfo.LastWriteTimeUtc.Ticks}";
+            }
+            catch
+            {
+                return imagePath;
+            }
         }
+        
+        /// <summary>
+        /// 캐시에서 조회 (LRU 갱신)
+        /// </summary>
+        private string? GetFromCache(string key)
+        {
+            lock (_cacheLock)
+            {
+                if (_cache.TryGetValue(key, out var entry))
+                {
+                    // LRU 순서 갱신 (앞으로 이동)
+                    if (entry.LruNode != null)
+                    {
+                        _lruOrder.Remove(entry.LruNode);
+                        entry.LruNode = _lruOrder.AddFirst(key);
+                    }
+                    return entry.Text;
+                }
+                return null;
+            }
+        }
+        
+        /// <summary>
+        /// 캐시에 추가 (크기 초과 시 LRU 제거)
+        /// </summary>
+        private void AddToCache(string key, string text)
+        {
+            lock (_cacheLock)
+            {
+                // 이미 있으면 업데이트
+                if (_cache.ContainsKey(key))
+                    return;
+                
+                var sizeBytes = (long)(text.Length * 2); // UTF-16
+                
+                // 크기 제한 초과 시 오래된 항목 제거
+                while ((_cache.Count >= MaxCacheEntries || _currentCacheSizeBytes + sizeBytes > MaxCacheSizeBytes) 
+                       && _lruOrder.Last != null)
+                {
+                    EvictOldestEntry();
+                }
+                
+                // 새 항목 추가
+                var node = _lruOrder.AddFirst(key);
+                _cache[key] = new OcrCacheEntry
+                {
+                    Text = text,
+                    SizeBytes = sizeBytes,
+                    CreatedAt = DateTime.UtcNow,
+                    LruNode = node
+                };
+                _currentCacheSizeBytes += sizeBytes;
+            }
+        }
+        
+        /// <summary>
+        /// 가장 오래된 항목 제거
+        /// </summary>
+        private void EvictOldestEntry()
+        {
+            if (_lruOrder.Last == null) return;
+            
+            var oldestKey = _lruOrder.Last.Value;
+            if (_cache.TryGetValue(oldestKey, out var entry))
+            {
+                _currentCacheSizeBytes -= entry.SizeBytes;
+                _cache.Remove(oldestKey);
+            }
+            _lruOrder.RemoveLast();
+        }
+        
+        /// <summary>
+        /// 캐시 비우기
+        /// </summary>
+        public void ClearCache()
+        {
+            lock (_cacheLock)
+            {
+                _cache.Clear();
+                _lruOrder.Clear();
+                _currentCacheSizeBytes = 0;
+            }
+        }
+        
+        /// <summary>
+        /// 캐시 통계 반환
+        /// </summary>
+        public (int Count, long SizeBytes, double SizeMB) GetCacheStats()
+        {
+            lock (_cacheLock)
+            {
+                return (_cache.Count, _currentCacheSizeBytes, _currentCacheSizeBytes / (1024.0 * 1024.0));
+            }
+        }
+        
+        #endregion
+        
+        #region Batch Processing
+        
+        /// <summary>
+        /// 배치 OCR 처리 (Python run_batch_ocr 포팅)
+        /// </summary>
+        public async Task<Dictionary<string, string>> ExtractTextBatchAsync(
+            IEnumerable<string> imagePaths,
+            bool filterWatermarks = true,
+            IProgress<(int current, int total, string filename)>? progress = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (!_isInitialized) 
+                if (!await InitializeAsync()) return new Dictionary<string, string>();
+            
+            var results = new Dictionary<string, string>();
+            var pathList = imagePaths.ToList();
+            int total = pathList.Count;
+            int current = 0;
+            
+            foreach (var imagePath in pathList)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                
+                var filename = Path.GetFileName(imagePath);
+                current++;
+                
+                progress?.Report((current, total, filename));
+                
+                try
+                {
+                    var text = await ExtractTextAsync(imagePath, filterWatermarks);
+                    results[filename] = text;
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Batch OCR error for {filename}: {ex.Message}");
+                    results[filename] = "";
+                }
+            }
+            
+            return results;
+        }
+        
+        /// <summary>
+        /// 폴더 내 모든 이미지 OCR 처리 (Python run_batch_ocr 폴더 버전)
+        /// </summary>
+        public async Task<Dictionary<string, string>> ExtractTextFromFolderAsync(
+            string folderPath,
+            bool filterWatermarks = true,
+            IProgress<(int current, int total, string filename)>? progress = null,
+            CancellationToken cancellationToken = default)
+        {
+            string[] extensions = { "*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp" };
+            var imageFiles = new List<string>();
+            
+            foreach (var ext in extensions)
+            {
+                imageFiles.AddRange(Directory.GetFiles(folderPath, ext, SearchOption.TopDirectoryOnly));
+            }
+            
+            imageFiles.Sort();
+            
+            return await ExtractTextBatchAsync(imageFiles, filterWatermarks, progress, cancellationToken);
+        }
+        
+        #endregion
+        
+        #region Cache Persistence (Python ocr_results.json 호환)
+        
+        private class CacheFileEntry
+        {
+            public string Filename { get; set; } = "";
+            public string Text { get; set; } = "";
+        }
+        
+        /// <summary>
+        /// 캐시를 JSON 파일로 저장 (Python의 ocr_results.json 호환)
+        /// </summary>
+        public async Task SaveCacheToFileAsync(string filePath)
+        {
+            var entries = new Dictionary<string, string>();
+            
+            lock (_cacheLock)
+            {
+                foreach (var kvp in _cache)
+                {
+                    // 키에서 파일명만 추출
+                    var parts = kvp.Key.Split('|');
+                    var filename = Path.GetFileName(parts[0]);
+                    entries[filename] = kvp.Value.Text;
+                }
+            }
+            
+            var json = JsonSerializer.Serialize(entries, new JsonSerializerOptions 
+            { 
+                WriteIndented = true,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            });
+            await File.WriteAllTextAsync(filePath, json, Encoding.UTF8);
+        }
+        
+        /// <summary>
+        /// JSON 파일에서 캐시 로드 (Python의 ocr_results.json 호환)
+        /// </summary>
+        public async Task LoadCacheFromFileAsync(string filePath)
+        {
+            if (!File.Exists(filePath)) return;
+            
+            try
+            {
+                var json = await File.ReadAllTextAsync(filePath, Encoding.UTF8);
+                var entries = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+                
+                if (entries == null) return;
+                
+                lock (_cacheLock)
+                {
+                    foreach (var kvp in entries)
+                    {
+                        if (string.IsNullOrEmpty(kvp.Value)) continue;
+                        
+                        // 파일명을 키로 사용 (간소화된 캐시)
+                        var key = kvp.Key;
+                        if (_cache.ContainsKey(key)) continue;
+                        
+                        var sizeBytes = (long)(kvp.Value.Length * 2);
+                        
+                        // 크기 제한 확인
+                        if (_cache.Count >= MaxCacheEntries || _currentCacheSizeBytes + sizeBytes > MaxCacheSizeBytes)
+                            break;
+                        
+                        var node = _lruOrder.AddLast(key); // 로드된 항목은 뒤로
+                        _cache[key] = new OcrCacheEntry
+                        {
+                            Text = kvp.Value,
+                            SizeBytes = sizeBytes,
+                            CreatedAt = DateTime.UtcNow,
+                            LruNode = node
+                        };
+                        _currentCacheSizeBytes += sizeBytes;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Cache load error: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// 파일명으로 OCR 결과 조회 (Python의 get_ocr_text 포팅)
+        /// </summary>
+        public string GetOcrText(string filename)
+        {
+            lock (_cacheLock)
+            {
+                // 파일명으로 직접 조회
+                if (_cache.TryGetValue(filename, out var entry))
+                    return entry.Text;
+                
+                // 전체 경로 키에서 파일명 매칭 시도
+                foreach (var kvp in _cache)
+                {
+                    var parts = kvp.Key.Split('|');
+                    if (Path.GetFileName(parts[0]) == filename)
+                        return kvp.Value.Text;
+                }
+                
+                return "";
+            }
+        }
+        
+        #endregion
+        
+        #region Watermark Detection
+        
+        /// <summary>
+        /// 이미지에서 워터마크 영역을 감지하고 바운딩 박스 반환
+        /// </summary>
+        public async Task<List<OcrBoundingBox>> GetWatermarkRegionsAsync(string imagePath)
+        {
+            if (!_isInitialized) 
+                if (!await InitializeAsync()) return new List<OcrBoundingBox>();
+
+            return await Task.Run(() =>
+            {
+                var watermarkRegions = new List<OcrBoundingBox>();
+                
+                try
+                {
+                    using var bmp = new System.Drawing.Bitmap(imagePath);
+                    var data = bmp.LockBits(new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height), 
+                        System.Drawing.Imaging.ImageLockMode.ReadOnly, 
+                        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+
+                    var imgStruct = new ImageStructure
+                    {
+                        type = 3,
+                        width = bmp.Width,
+                        height = bmp.Height,
+                        step_size = data.Stride,
+                        data_ptr = data.Scan0
+                    };
+
+                    long resultHandle;
+                    if (RunOcrPipeline(_pipeline, ref imgStruct, _procOpts, out resultHandle) != 0)
+                    {
+                        bmp.UnlockBits(data);
+                        return watermarkRegions;
+                    }
+
+                    bmp.UnlockBits(data);
+
+                    GetOcrLineCount(resultHandle, out long count);
+                    
+                    for (long i = 0; i < count; i++)
+                    {
+                        GetOcrLine(resultHandle, i, out long lineHandle);
+                        GetOcrLineContent(lineHandle, out IntPtr ptr);
+                        string? line = Marshal.PtrToStringUTF8(ptr);
+                        
+                        if (!string.IsNullOrWhiteSpace(line) && IsWatermark(line))
+                        {
+                            // 워터마크 텍스트의 바운딩 박스 획득
+                            if (GetOcrLineBoundingBox(lineHandle, out IntPtr bboxPtr) == 0 && bboxPtr != IntPtr.Zero)
+                            {
+                                try
+                                {
+                                    // 포인터에서 4개의 float 읽기
+                                    float[] coords = new float[4];
+                                    Marshal.Copy(bboxPtr, coords, 0, 4);
+                                    
+                                    var bbox = new OcrBoundingBox
+                                    {
+                                        Left = coords[0],
+                                        Top = coords[1],
+                                        Right = coords[2],
+                                        Bottom = coords[3]
+                                    };
+                                    
+                                    // 유효한 바운딩 박스인지 확인
+                                    if (bbox.Width > 0 && bbox.Height > 0)
+                                    {
+                                        watermarkRegions.Add(bbox);
+                                        System.Diagnostics.Debug.WriteLine(
+                                            $"Watermark detected: \"{line}\" at ({bbox.Left}, {bbox.Top}, {bbox.Right}, {bbox.Bottom})");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    System.Diagnostics.Debug.WriteLine($"BBox read error: {ex.Message}");
+                                }
+                            }
+                        }
+                    }
+
+                    ReleaseOcrResult(resultHandle);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"GetWatermarkRegions error: {ex.Message}");
+                }
+                
+                return watermarkRegions;
+            });
+        }
+        
+        /// <summary>
+        /// 워터마크 영역 정보와 함께 모든 OCR 결과 반환
+        /// </summary>
+        public async Task<List<(string Text, OcrBoundingBox BBox, bool IsWatermark)>> ExtractTextWithBoundingBoxesAsync(string imagePath)
+        {
+            if (!_isInitialized) 
+                if (!await InitializeAsync()) return new List<(string, OcrBoundingBox, bool)>();
+
+            return await Task.Run(() =>
+            {
+                var results = new List<(string Text, OcrBoundingBox BBox, bool IsWatermark)>();
+                
+                try
+                {
+                    using var bmp = new System.Drawing.Bitmap(imagePath);
+                    var data = bmp.LockBits(new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height), 
+                        System.Drawing.Imaging.ImageLockMode.ReadOnly, 
+                        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+
+                    var imgStruct = new ImageStructure
+                    {
+                        type = 3,
+                        width = bmp.Width,
+                        height = bmp.Height,
+                        step_size = data.Stride,
+                        data_ptr = data.Scan0
+                    };
+
+                    long resultHandle;
+                    if (RunOcrPipeline(_pipeline, ref imgStruct, _procOpts, out resultHandle) != 0)
+                    {
+                        bmp.UnlockBits(data);
+                        return results;
+                    }
+
+                    bmp.UnlockBits(data);
+
+                    GetOcrLineCount(resultHandle, out long count);
+                    
+                    for (long i = 0; i < count; i++)
+                    {
+                        GetOcrLine(resultHandle, i, out long lineHandle);
+                        GetOcrLineContent(lineHandle, out IntPtr ptr);
+                        string? line = Marshal.PtrToStringUTF8(ptr);
+                        
+                        if (!string.IsNullOrWhiteSpace(line))
+                        {
+                            var bbox = new OcrBoundingBox();
+                            
+                            if (GetOcrLineBoundingBox(lineHandle, out IntPtr bboxPtr) == 0 && bboxPtr != IntPtr.Zero)
+                            {
+                                try
+                                {
+                                    float[] coords = new float[4];
+                                    Marshal.Copy(bboxPtr, coords, 0, 4);
+                                    bbox = new OcrBoundingBox
+                                    {
+                                        Left = coords[0],
+                                        Top = coords[1],
+                                        Right = coords[2],
+                                        Bottom = coords[3]
+                                    };
+                                }
+                                catch { }
+                            }
+                            
+                            results.Add((line, bbox, IsWatermark(line)));
+                        }
+                    }
+
+                    ReleaseOcrResult(resultHandle);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"ExtractTextWithBoundingBoxes error: {ex.Message}");
+                }
+                
+                return results;
+            });
+        }
+        
+        #endregion
     }
 }

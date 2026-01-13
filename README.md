@@ -151,8 +151,9 @@ GeminiWebTranslator_Net8/
 # https://dotnet.microsoft.com/download/dotnet/8.0
 
 # 2. 저장소 클론
-git clone https://github.com/yourusername/GeminiWebTranslator_Net8.git
+git clone <repository-url>
 cd GeminiWebTranslator_Net8
+
 
 # 3. Standalone 빌드 (단일 .exe 생성)
 dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ./publish
@@ -400,9 +401,8 @@ Remove-Item -Recurse -Force ./chrome_bin
 
 ## 👨‍💻 개발자
 
-**프로젝트 관리자**: [Your Name]  
-**이메일**: your.email@example.com  
-**GitHub**: [@yourusername](https://github.com/yourusername)
+이 프로젝트는 개인 프로젝트로 개발되었습니다.  
+문의사항이나 버그 리포트는 [GitHub Issues](../../issues)를 이용해 주세요.
 
 ---
 
@@ -424,6 +424,6 @@ Remove-Item -Recurse -Force ./chrome_bin
 
 <div align="center">
 
-Made .NET 8.0
+**Made with ❤️ and .NET 8.0**
 
 </div>

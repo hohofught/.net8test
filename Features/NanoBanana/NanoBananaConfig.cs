@@ -82,8 +82,11 @@ public class NanoBananaConfig
     /// <summary>이미지 생성 모드 사용</summary>
     public bool UseImageGeneration { get; set; } = true;
 
-    /// <summary>OCR 텍스트 추출 사용</summary>
-    public bool UseOcr { get; set; } = true;
+    /// <summary>Gemini OCR 보조 사용 (워터마크 텍스트를 프롬프트에 포함)</summary>
+    public bool UseGeminiOcrAssist { get; set; } = true;
+
+    /// <summary>OCR 로컬 제거 사용 (실험적 - OpenCV Inpainting)</summary>
+    public bool UseLocalOcrRemoval { get; set; } = false;
 
     /// <summary>브라우저 숨김 모드 사용</summary>
     public bool UseHiddenBrowser { get; set; } = false;

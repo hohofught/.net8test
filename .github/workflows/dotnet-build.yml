@@ -26,17 +26,21 @@ jobs:
     - name: Restore dependencies
       run: dotnet restore
 
-    - name: Publish Standalone
+    - name: Publish Standalone EXE
       run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o ./publish
 
-    - name: Zip Release
-      run: Compress-Archive -Path ./publish/* -DestinationPath ./GeminiWebTranslator_Windows.zip
+    - name: Rename EXE
+      run: |
+        $exeFile = Get-ChildItem -Path ./publish -Filter *.exe | Select-Object -First 1
+        if ($exeFile) {
+          Copy-Item $exeFile.FullName -Destination ./GeminiWebTranslator.exe
+        }
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: GeminiWebTranslator_Windows
-        path: ./GeminiWebTranslator_Windows.zip
+        path: ./GeminiWebTranslator.exe
 
   release:
     needs: build
@@ -64,11 +68,11 @@ jobs:
         name: Release ${{ steps.version.outputs.VERSION }}
         body: |
           ## 자동 릴리즈
-          - **Windows**: GeminiWebTranslator_Windows.zip
+          - **Windows**: GeminiWebTranslator.exe (단일 실행 파일)
           
           커밋: ${{ github.sha }}
         files: |
-          GeminiWebTranslator_Windows.zip
+          GeminiWebTranslator.exe
         draft: false
         prerelease: false
       env:

@@ -504,7 +504,8 @@ public partial class NanoBananaMainForm : Form
         txtPrompt.Text = _config.Prompt;
         chkProMode.Checked = _config.UseProMode;
         chkImageGen.Checked = _config.UseImageGeneration;
-        chkUseOcr.Checked = _config.UseOcr;
+        chkGeminiOcrAssist.Checked = _config.UseGeminiOcrAssist;
+        chkLocalOcrRemoval.Checked = _config.UseLocalOcrRemoval;
         
 
         RefreshImageList();
@@ -517,7 +518,8 @@ public partial class NanoBananaMainForm : Form
         _config.Prompt = txtPrompt.Text;
         _config.UseProMode = chkProMode.Checked;
         _config.UseImageGeneration = chkImageGen.Checked;
-        _config.UseOcr = chkUseOcr.Checked;
+        _config.UseGeminiOcrAssist = chkGeminiOcrAssist.Checked;
+        _config.UseLocalOcrRemoval = chkLocalOcrRemoval.Checked;
         _config.Save();
     }
     
@@ -1001,7 +1003,7 @@ public partial class NanoBananaMainForm : Form
         // 2. 프롬프트 준비 (OCR 포함 전체 프롬프트 & 단순 프롬프트)
         string? ocrText = null;
         
-        if (chkUseOcr.Checked)
+        if (chkGeminiOcrAssist.Checked)
         {
             UpdateImageStatus(filename, "OCR 분석 중...");
             AppendLog($"  OCR 분석 중...");
@@ -1113,10 +1115,10 @@ public partial class NanoBananaMainForm : Form
         }
         ct.ThrowIfCancellationRequested();
         
-        // 6. 프롬프트 전송
+        // 6. 프롬프트 전송 ({ocr_text} 플레이스홀더 사용)
         var currentPrompt = txtPrompt.Text;
 
-        if (chkUseOcr.Checked)
+        if (chkGeminiOcrAssist.Checked)
         {
             UpdateImageStatus(Path.GetFileName(imagePath), "OCR 분석 중...");
             AppendLog($"  OCR 분석 중...");
@@ -1125,11 +1127,25 @@ public partial class NanoBananaMainForm : Form
             {
                 var shortText = ocrText.Replace("\n", " ").Length > 50 ? ocrText.Replace("\n", " ").Substring(0, 50) + "..." : ocrText.Replace("\n", " ");
                 AppendLog($"  [OCR] 텍스트 감지: {shortText}");
-                currentPrompt += $"\n\nContext - The following text exists in the image and must be removed/cleaned: {ocrText}";
+                
+                // {ocr_text} 플레이스홀더 치환
+                if (currentPrompt.Contains("{ocr_text}"))
+                {
+                    currentPrompt = currentPrompt.Replace("{ocr_text}", ocrText);
+                    AppendLog($"  [OCR] {{ocr_text}} 플레이스홀더에 OCR 텍스트 대입됨");
+                }
+                else
+                {
+                    // 플레이스홀더가 없으면 끝에 추가 (호환성)
+                    currentPrompt += $"\n\nContext - The following text exists in the image and must be removed/cleaned: {ocrText}";
+                    AppendLog($"  [OCR] 프롬프트 끝에 OCR 텍스트 추가됨 ({{ocr_text}} 플레이스홀더 없음)");
+                }
             }
             else
             {
                 AppendLog($"  [OCR] 텍스트 없음");
+                // OCR 텍스트 없으면 {ocr_text} 플레이스홀더 제거
+                currentPrompt = currentPrompt.Replace("{ocr_text}", "");
             }
             UpdateImageStatus(Path.GetFileName(imagePath), "처리 중...");
         }
