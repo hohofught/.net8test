@@ -763,6 +763,27 @@ public class GeminiAutomation : IGeminiAutomation
     }
 
     /// <summary>
+    /// Gemini 응답 생성을 중지합니다. (IGeminiAutomation 인터페이스 구현)
+    /// </summary>
+    public async Task<bool> StopGeminiResponseAsync()
+    {
+        if (_webView?.CoreWebView2 == null) return false;
+        
+        try
+        {
+            Log("Gemini 응답 생성 중지 시도...");
+            var result = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.StopGeminiResponseScript);
+            Log($"중지 결과: {result}");
+            return result != "\"no_stop_button_found\"";
+        }
+        catch (Exception ex)
+        {
+            Log($"응답 중지 오류: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 지능형 복구 로직이 포함된 답변 생성 프로세스입니다. 실패 시 최대 3회까지 자동 복구를 시도합니다.
     /// </summary>
     public async Task<(string Response, bool WasRecovered)> GenerateContentWithRecoveryAsync(string prompt)

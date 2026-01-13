@@ -53,6 +53,9 @@ public interface IGeminiAutomation
     /// <summary>프롬프트 전송 및 응답 반환 (통합 메서드)</summary>
     Task<string> GenerateContentAsync(string prompt);
     
+    /// <summary>Gemini 응답 생성을 중지합니다.</summary>
+    Task<bool> StopGeminiResponseAsync();
+    
     #endregion
     
     #region 이미지 처리 (NanoBanana용)

@@ -14,15 +14,19 @@ namespace GeminiWebTranslator;
 /// PuppeteerSharp로 Edge 브라우저에 연결하여 JavaScript 주입
 /// 통합전용/main.py의 안정화 방안 적용
 /// </summary>
-public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
+public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposable
 {
     private IBrowser? _browser;
     private IPage? _page;
     private readonly int _debugPort;
-
+    private bool _isDisposed = false;
+    private bool _browserDisconnected = false;
 
     
     public event Action<string>? OnLog;
+    
+    /// <summary>브라우저가 예기치 않게 종료되었을 때 발생</summary>
+    public event Action? OnBrowserDisconnected;
     
     private void Log(string msg) => OnLog?.Invoke($"[EdgeCDP] {msg}");
     
@@ -100,6 +104,71 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
     }
     
     /// <summary>
+    /// 브라우저와의 연결 상태를 능동적으로 확인합니다.
+    /// 단순히 IsConnected 속성만 확인하는 것이 아니라 실제 통신을 시도합니다.
+    /// </summary>
+    public async Task<bool> CheckConnectionAsync()
+    {
+        if (_isDisposed || _browserDisconnected) return false;
+        if (_browser == null || !_browser.IsConnected || _page == null || _page.IsClosed) return false;
+        
+        try
+        {
+            // 간단한 JS 실행으로 응답 확인
+            await _page.EvaluateExpressionAsync("1 + 1");
+            return true;
+        }
+        catch
+        {
+            _browserDisconnected = true;
+            return false;
+        }
+    }
+    
+    /// <summary>
+    /// 연결이 유효한지 확인하고, 필요시 복구를 시도합니다.
+    /// 모든 페이지 작업 전에 호출하여 안정성을 보장합니다.
+    /// </summary>
+    public async Task<bool> EnsureConnectionAsync()
+    {
+        if (_isDisposed) 
+        {
+            Log("오류: 이미 Dispose된 인스턴스입니다.");
+            return false;
+        }
+        
+        if (_browserDisconnected)
+        {
+            Log("경고: 브라우저가 종료되었습니다. 재연결이 필요합니다.");
+            OnBrowserDisconnected?.Invoke();
+            return false;
+        }
+        
+        // 빠른 연결 확인
+        if (await CheckConnectionAsync())
+        {
+            return true;
+        }
+        
+        // 연결 실패 - 상태 업데이트
+        Log("경고: 브라우저 연결이 끊어졌습니다.");
+        _browserDisconnected = true;
+        OnBrowserDisconnected?.Invoke();
+        return false;
+    }
+    
+    /// <summary>
+    /// 브라우저 종료 이벤트 핸들러
+    /// </summary>
+    private void OnBrowserClosed(object? sender, EventArgs e)
+    {
+        Log("브라우저가 종료되었습니다.");
+        _browserDisconnected = true;
+        _browser = null;
+        OnBrowserDisconnected?.Invoke();
+    }
+    
+    /// <summary>
     /// 기존 IBrowser 인스턴스를 사용하여 연결 (IsolatedBrowserManager용)
     /// </summary>
     /// <param name="browser">IsolatedBrowserManager에서 생성한 브라우저 인스턴스</param>
@@ -109,6 +178,13 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
         {
             Log("기존 브라우저 인스턴스에 연결 중...");
             _browser = browser;
+            
+            // 브라우저 연결 상태 확인
+            if (!_browser.IsConnected)
+            {
+                Log("오류: 브라우저가 연결되지 않은 상태입니다.");
+                return false;
+            }
             
             // Gemini 페이지 찾기 (기존 탭 재사용 우선)
             var pages = await _browser.PagesAsync();
@@ -129,12 +205,46 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
                 
                 if (!_page.Url.Contains("gemini.google.com"))
                 {
-                    await _page.GoToAsync("https://gemini.google.com/app");
+                    Log("Gemini 페이지로 이동 중...");
+                    await _page.GoToAsync("https://gemini.google.com/app", new NavigationOptions 
+                    { 
+                        WaitUntil = new[] { WaitUntilNavigation.DOMContentLoaded },
+                        Timeout = 30000 
+                    });
                 }
+            }
+            
+            // 페이지 로드 대기 (최대 10초)
+            Log("페이지 로드 대기 중...");
+            for (int i = 0; i < 20; i++)
+            {
+                var isReady = await _page.EvaluateFunctionAsync<bool>(@"() => {
+                    const editor = document.querySelector('.ql-editor, [contenteditable=""true""]');
+                    return editor !== null;
+                }");
+                
+                if (isReady)
+                {
+                    Log("Gemini 입력창 준비됨");
+                    break;
+                }
+                
+                await Task.Delay(500);
+            }
+            
+            // 로그인 상태 확인
+            var isLoggedIn = await CheckLoginStatusAsync();
+            if (!isLoggedIn)
+            {
+                Log("경고: 로그인되지 않은 상태입니다. 브라우저에서 Google 계정으로 로그인해주세요.");
             }
             
             // 자동화 감지 우회 스크립트 주입
             await InjectAntiDetectionAsync();
+            
+            // 브라우저 종료 이벤트 핸들러 등록
+            _browser.Disconnected += OnBrowserClosed;
+            _browserDisconnected = false;
             
             Log("브라우저 인스턴스 연결 성공");
             return true;
@@ -142,6 +252,34 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
         catch (Exception ex)
         {
             Log($"브라우저 인스턴스 연결 실패: {ex.Message}");
+            return false;
+        }
+    }
+    
+    /// <summary>
+    /// 로그인 상태 확인
+    /// </summary>
+    private async Task<bool> CheckLoginStatusAsync()
+    {
+        if (_page == null) return false;
+        
+        try
+        {
+            // 로그인 버튼 또는 로그인 프롬프트가 있는지 확인
+            var isLoggedIn = await _page.EvaluateFunctionAsync<bool>(@"() => {
+                // 로그인 필요 표시가 있는지 확인
+                const loginPrompt = document.querySelector('[data-signin], button[aria-label*=""Sign in""], a[href*=""accounts.google.com/ServiceLogin""]');
+                if (loginPrompt) return false;
+                
+                // 입력창이 있으면 로그인됨
+                const editor = document.querySelector('.ql-editor, [contenteditable=""true""]');
+                return editor !== null;
+            }");
+            
+            return isLoggedIn;
+        }
+        catch
+        {
             return false;
         }
     }
@@ -257,18 +395,17 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
                 return true;
             }
             
-            // JavaScript 파일 로드 (Resources/Scripts 하위)
-            var scriptPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Resources", "Scripts", "NanoBananaAutomation.js");
-            if (!System.IO.File.Exists(scriptPath))
+            // GeminiCommon + NanoBanana 스크립트를 함께 로드
+            var script = GeminiScripts.LoadAllNanoBananaScripts();
+            if (string.IsNullOrEmpty(script))
             {
-                Log($"NanoBanana 스크립트 파일을 찾을 수 없습니다: {scriptPath}");
+                Log("NanoBanana 스크립트 파일을 찾을 수 없습니다");
                 return false;
             }
             
-            var script = await System.IO.File.ReadAllTextAsync(scriptPath);
             await _page.EvaluateExpressionAsync(script);
             
-            Log("NanoBanana 자동화 스크립트 주입됨");
+            Log("NanoBanana 자동화 스크립트 주입됨 (GeminiCommon 포함)");
             return true;
         }
         catch (Exception ex)
@@ -344,22 +481,57 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
     
     public async Task StartNewChatAsync()
     {
-        if (_page == null) return;
+        // 연결 상태 확인
+        if (!await EnsureConnectionAsync())
+        {
+            Log("오류: 브라우저 연결이 없어 새 채팅을 시작할 수 없습니다.");
+            return;
+        }
         
         Log("새 채팅 시작...");
-        await _page.GoToAsync("https://gemini.google.com/app");
-        await Task.Delay(1500);
         
-        // 자동화 감지 우회 재주입
-        await InjectAntiDetectionAsync();
-        
-        // 입력창 준비 대기
-        for (int i = 0; i < 30; i++)
+        try
         {
-            if (await IsReadyAsync()) break;
-            await Task.Delay(300);
+            // 새 채팅 페이지로 이동
+            await _page!.GoToAsync("https://gemini.google.com/app", new NavigationOptions
+            {
+                WaitUntil = new[] { WaitUntilNavigation.DOMContentLoaded },
+                Timeout = 30000
+            });
+            
+            await Task.Delay(1500);
+            
+            // 자동화 감지 우회 재주입
+            await InjectAntiDetectionAsync();
+            
+            // NanoBanana 스크립트 재주입 (새 페이지이므로 필요)
+            await InjectNanoBananaScriptAsync();
+            
+            // 입력창 준비 대기 (최대 15초)
+            bool isReady = false;
+            for (int i = 0; i < 30; i++)
+            {
+                if (await IsReadyAsync()) 
+                {
+                    isReady = true;
+                    break;
+                }
+                await Task.Delay(500);
+            }
+            
+            if (isReady)
+            {
+                Log("새 채팅 준비 완료");
+            }
+            else
+            {
+                Log("경고: 입력창이 준비되지 않았을 수 있습니다.");
+            }
         }
-        Log("새 채팅 준비 완료");
+        catch (Exception ex)
+        {
+            Log($"새 채팅 시작 실패: {ex.Message}");
+        }
     }
     
     public async Task<bool> SelectProModeAsync()
@@ -635,14 +807,36 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
         return await WaitForResponseAsync();
     }
     
+    /// <summary>
+    /// Gemini 응답 생성을 중지합니다.
+    /// </summary>
+    public async Task<bool> StopGeminiResponseAsync()
+    {
+        if (_page == null) return false;
+        
+        try
+        {
+            Log("Gemini 응답 생성 중지 시도...");
+            // IIFE 스크립트는 EvaluateExpressionAsync로 실행해야 함
+            var result = await _page.EvaluateExpressionAsync<string>(GeminiScripts.StopGeminiResponseScript);
+            Log($"중지 결과: {result}");
+            return result != "no_stop_button_found";
+        }
+        catch (Exception ex)
+        {
+            Log($"응답 중지 오류: {ex.Message}");
+            return false;
+        }
+    }
+    
     public async Task<bool> OpenUploadMenuAsync()
     {
         if (_page == null) return false;
         
-        Log("업로드 메뉴 열기...");
+        Log("업로드 메뉴 열기 (서브메뉴 클릭으로 input 생성)...");
         try
         {
-            // 업로드 버튼 클릭 (여러 셀렉터 시도)
+            // 1. 메인 업로드 버튼 클릭 (+ 버튼)
             var menuResult = await _page.EvaluateFunctionAsync<string>(@"() => {
                 const selectors = [
                     'button[aria-label=""파일 업로드 메뉴 열기""]',
@@ -662,35 +856,42 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
             
             if (menuResult != "menu_opened")
             {
-                Log("업로드 메뉴 버튼을 찾을 수 없습니다");
+                Log("업로드 메뉴 버튼을 찾을 수 없음");
                 return false;
             }
             
-            await Task.Delay(500);
-            Log("업로드 메뉴 열림");
+            await Task.Delay(500); // Python 타이밍 참조: 500ms
             
-            // 파일 업로드 서브메뉴 버튼 클릭
-            var subMenuResult = await _page.EvaluateFunctionAsync<string>(@"() => {
+            // 2. [핵심] 서브메뉴(파일 업로드) 버튼 클릭 - input[type=file] 동적 생성 유도
+            // PuppeteerSharp의 UploadFileAsync는 네이티브 다이얼로그를 트리거하지 않으므로 안전
+            var submenuResult = await _page.EvaluateFunctionAsync<string>(@"() => {
                 const selectors = [
                     'button[aria-label=""파일 업로드. 문서, 데이터, 코드 파일""]',
-                    'button[aria-label*=""파일 업로드""]'
+                    'button[aria-label*=""파일 업로드""]',
+                    'button[aria-label*=""Upload file""]',
+                    'button[aria-label=""File upload. Documents, data files, or code""]'
                 ];
                 for (const sel of selectors) {
                     const btn = document.querySelector(sel);
                     if (btn) { 
                         btn.click(); 
-                        return 'clicked'; 
+                        return 'submenu_clicked'; 
                     }
                 }
                 return 'not_found';
             }");
             
-            if (subMenuResult == "clicked")
+            if (submenuResult == "submenu_clicked")
             {
-                Log("파일 업로드 버튼 클릭됨");
+                Log("서브메뉴(파일 업로드) 클릭됨 - input 생성 대기 중...");
+            }
+            else
+            {
+                Log("서브메뉴를 찾을 수 없음, 직접 input 검색 시도...");
             }
             
-            Log("업로드 메뉴 열림 - 파일 선택 대기");
+            await Task.Delay(300); // Python 타이밍 참조
+            
             return true;
         }
         catch (Exception ex)
@@ -712,15 +913,29 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
             try
             {
                 var hasAttachment = await _page.EvaluateFunctionAsync<bool>(@"() => {
-                    const attachments = document.querySelectorAll(
-                        ""img[src*='blob:'], .attachment-thumbnail, content-container img""
-                    );
-                    return attachments.length > 0;
+                    const selectors = [
+                        ""img[src*='blob:']"", 
+                        "".attachment-thumbnail"", 
+                        ""content-container img"",
+                        "".input-area-container img"",
+                        "".rich-textarea img"",
+                        "".ql-editor img"",
+                        "".file-chip"",
+                        "".attachment-chip"",
+                        ""[data-filename]"",
+                        "".uploaded-file-name"",
+                        ""button[aria-label*='삭제']"",
+                        ""button[aria-label*='Remove']""
+                    ];
+                    for (const sel of selectors) {
+                        if (document.querySelector(sel)) return true;
+                    }
+                    return false;
                 }");
                 
                 if (hasAttachment)
                 {
-                    Log("이미지 업로드 완료");
+                    Log($"이미지 업로드 완료 ({Math.Round((DateTime.Now - startTime).TotalSeconds, 1)}초)");
                     return true;
                 }
             }
@@ -732,6 +947,82 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
         Log("이미지 업로드 타임아웃");
         return false;
     }
+    
+    /// <summary>
+    /// 이미지가 현재 첨부되어 있는지 즉시 확인 (대기 없음)
+    /// 메시지 전송 전 검증용
+    /// </summary>
+    public async Task<bool> IsImageAttachedAsync()
+    {
+        if (_page == null) return false;
+        
+        try
+        {
+            return await _page.EvaluateFunctionAsync<bool>(@"() => {
+                const selectors = [
+                    ""img[src*='blob:']"", 
+                    "".attachment-thumbnail"", 
+                    ""content-container img"",
+                    "".input-area-container img"",
+                    "".rich-textarea img"",
+                    "".ql-editor img"",
+                    "".file-chip"",
+                    "".attachment-chip"",
+                    ""[data-filename]"",
+                    "".uploaded-file-name"",
+                    ""button[aria-label*='삭제']"",
+                    ""button[aria-label*='Remove']""
+                ];
+                for (const sel of selectors) {
+                    if (document.querySelector(sel)) return true;
+                }
+                return false;
+            }");
+        }
+        catch
+        {
+            return false;
+        }
+    }
+    
+    /// <summary>
+    /// 페이지 새로고침 및 JavaScript 상태 초기화
+    /// 연속 실패 시 사용
+    /// </summary>
+    public async Task<bool> ResetPageStateAsync()
+    {
+        if (_page == null) return false;
+        
+        try
+        {
+            Log("페이지 상태 초기화 (새로고침)...");
+            
+            // 페이지 새로고침
+            await _page.ReloadAsync();
+            await Task.Delay(3000); // 로딩 대기
+            
+            // Gemini 페이지 로드 확인
+            var isGemini = await _page.EvaluateFunctionAsync<bool>(@"() => {
+                return window.location.hostname.includes('gemini.google.com');
+            }");
+            
+            if (!isGemini)
+            {
+                Log("Gemini 페이지가 아님, 재탐색...");
+                await NavigateToGeminiAsync();
+                await Task.Delay(2000);
+            }
+            
+            Log("페이지 상태 초기화 완료");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log($"페이지 초기화 오류: {ex.Message}");
+            return false;
+        }
+    }
+
     
     public async Task<bool> DownloadResultImageAsync()
     {
@@ -787,22 +1078,30 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
     /// <summary>현재 채팅 삭제 - 상단 메뉴 버튼 사용</summary>
     public async Task<bool> DeleteCurrentChatAsync()
     {
-        if (_page == null) return false;
+        // 연결 상태 확인
+        if (!await EnsureConnectionAsync())
+        {
+            Log("오류: 브라우저 연결이 없어 채팅을 삭제할 수 없습니다.");
+            return false;
+        }
         
         Log("채팅 삭제 중...");
         try
         {
             // 1. 상단의 대화 작업 메뉴 버튼 클릭
-            var menuResult = await _page.EvaluateFunctionAsync<string>(@"() => {
+            var menuResult = await _page!.EvaluateFunctionAsync<string>(@"() => {
                 const selectors = [
                     'button.conversation-actions-menu-button',
                     'button[aria-label=""대화 작업 메뉴 열기""]',
                     'button[aria-label*=""대화 작업""]',
-                    'button[aria-label=""Open conversation actions menu""]'
+                    'button[aria-label=""Open conversation actions menu""]',
+                    'button[aria-label*=""actions""]',
+                    'button[data-test-id=""conversation-menu-button""]'
                 ];
                 for (const sel of selectors) {
                     const btn = document.querySelector(sel);
                     if (btn && btn.offsetParent !== null) { 
+                        btn.scrollIntoView({ behavior: 'instant', block: 'center' });
                         btn.click(); 
                         return 'ok'; 
                     }
@@ -812,17 +1111,20 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
             
             if (menuResult != "ok")
             {
-                Log("메뉴 버튼을 찾을 수 없습니다");
-                return false;
+                Log("메뉴 버튼을 찾을 수 없습니다. 폴백: 새 채팅으로 이동...");
+                // 폴백: 현재 채팅을 삭제하지 않고 새 채팅으로 이동
+                await StartNewChatAsync();
+                return true; // 새 채팅으로 대체
             }
             
-            await Task.Delay(500);
+            await Task.Delay(800); // 메뉴 애니메이션 대기
             
             // 2. 삭제 메뉴 항목 클릭
             var deleteResult = await _page.EvaluateFunctionAsync<string>(@"() => {
-                const items = document.querySelectorAll('[role=""menuitem""], button.mat-mdc-menu-item');
+                const items = document.querySelectorAll('[role=""menuitem""], button.mat-mdc-menu-item, .mat-mdc-menu-item');
                 for (const item of items) {
-                    if (item.textContent.includes('삭제') || item.textContent.includes('Delete')) {
+                    const text = item.textContent || '';
+                    if (text.includes('삭제') || text.includes('Delete') || text.toLowerCase().includes('delete')) {
                         item.click();
                         return 'ok';
                     }
@@ -833,21 +1135,32 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
             if (deleteResult != "ok")
             {
                 await _page.Keyboard.PressAsync("Escape");
-                Log("삭제 버튼을 찾을 수 없습니다");
-                return false;
+                Log("삭제 메뉴 항목을 찾을 수 없습니다. 폴백: 새 채팅으로 이동...");
+                await StartNewChatAsync();
+                return true;
             }
             
-            await Task.Delay(1000); // 다이얼로그 나타나기 대기
+            await Task.Delay(1500); // 다이얼로그 나타나기 대기 (시간 증가)
             
-            // 3. 삭제 확인 다이얼로그
+            // 3. 삭제 확인 다이얼로그 (확장된 선택자)
             var confirmResult = await _page.EvaluateFunctionAsync<string>(@"() => {
-                const buttons = document.querySelectorAll(
-                    'mat-dialog-actions button, .mat-dialog-actions button, .mat-mdc-dialog-actions button, button.mat-mdc-button'
-                );
-                for (const btn of buttons) {
-                    if (btn.textContent.includes('삭제') || btn.textContent.includes('Delete')) {
-                        btn.click();
-                        return 'ok';
+                const selectors = [
+                    'mat-dialog-actions button',
+                    '.mat-dialog-actions button',
+                    '.mat-mdc-dialog-actions button',
+                    'button.mat-mdc-button',
+                    '[role=""dialog""] button',
+                    '.cdk-overlay-container button'
+                ];
+                
+                for (const containerSel of selectors) {
+                    const buttons = document.querySelectorAll(containerSel);
+                    for (const btn of buttons) {
+                        const text = btn.textContent || '';
+                        if (text.includes('삭제') || text.includes('Delete') || text.toLowerCase().includes('delete')) {
+                            btn.click();
+                            return 'ok';
+                        }
                     }
                 }
                 return 'not_found';
@@ -855,18 +1168,33 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
             
             if (confirmResult == "ok")
             {
-                await Task.Delay(1000);
+                await Task.Delay(1500); // 삭제 완료 대기
                 Log("채팅 삭제됨");
                 return true;
             }
             
-            Log("삭제 확인 실패");
-            return false;
+            // 다이얼로그 닫기 시도
+            await _page.Keyboard.PressAsync("Escape");
+            await Task.Delay(500);
+            
+            Log("삭제 확인 실패. 폴백: 새 채팅으로 이동...");
+            await StartNewChatAsync();
+            return true; // 새 채팅으로 대체
         }
         catch (Exception ex)
         {
             Log($"채팅 삭제 실패: {ex.Message}");
-            return false;
+            // 폴백 시도
+            try
+            {
+                Log("폴백: 새 채팅으로 이동 시도...");
+                await StartNewChatAsync();
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
     }
     
@@ -875,7 +1203,10 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
     #region CDP 강화 기능 (자동 이미지 처리)
     
     /// <summary>
-    /// 이미지 파일을 PuppeteerSharp 네이티브 기능 및 CDP Interception으로 업로드
+    /// 이미지 파일을 PuppeteerSharp FileChooser 인터셉트로 업로드
+    /// 1차: FileChooser 인터셉트 (다이얼로그 없음)
+    /// 2차: 기존 input[type=file] 직접 접근
+    /// 3차: JavaScript DataTransfer 폴백
     /// </summary>
     public async Task<bool> UploadImageAsync(string imagePath)
     {
@@ -889,101 +1220,196 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
                 return false;
             }
             
-            Log($"이미지 업로드 시작 (Native + CDP): {System.IO.Path.GetFileName(imagePath)}");
+            var filename = System.IO.Path.GetFileName(imagePath);
+            Log($"이미지 업로드 시작: {filename}");
 
-            // 1. 업로드 메뉴 열기 (input[type="file"] 생성 유도)
-            await OpenUploadMenuAsync();
-            await Task.Delay(1000);
-            
-            // 2. input[type="file"] 요소 찾기
-            var fileInput = await _page.QuerySelectorAsync("input[type='file']");
-            
-            if (fileInput == null)
-            {
-                var inputs = await _page.QuerySelectorAllAsync("input[type='file']");
-                fileInput = inputs.LastOrDefault();
-            }
-            
-            // 3. 요소가 있으면 네이티브 업로드 수행 (가장 안정적)
-            if (fileInput != null)
-            {
-                Log("파일 입력 요소 발견, 네이티브 업로드 수행...");
-                await fileInput.UploadFileAsync(imagePath);
-                
-                await WaitForImageUploadAsync(10);
-                Log($"파일 업로드 완료(Native): {System.IO.Path.GetFileName(imagePath)}");
-                return true;
-            }
-            
-            // 4. 요소가 없으면 CDP Interception 사용 (강력한 폴백)
-            Log("파일 입력 요소를 찾을 수 없음, CDP Interception 활성화...");
-            
+            // ============================================================
+            // 방법 1: FileChooser 인터셉트 (네이티브 다이얼로그 차단)
+            // 핵심: 서브메뉴 클릭 직전에 리스너 등록해야 함
+            // ============================================================
             try
             {
-                // CDP 세션 획득
-                var client = _page.Client; // PuppeteerSharp의 CDPSession
+                Log("[1차] FileChooser 인터셉트 방식 시도...");
                 
-                // 파일 선택 다이얼로그 인터셉트 활성화
-                await client.SendAsync("Page.setInterceptFileChooserDialog", new { enabled = true });
-                
-                var fileChooserTcs = new TaskCompletionSource<bool>();
-                
-                // 이벤트 핸들러: 파일 선택 다이얼로그가 열리면 파일 경로 전송 및 수락
-                void OnFileChooserOpened(object? sender, MessageEventArgs e)
-                {
-                    if (e.MessageID == "Page.fileChooserOpened")
-                    {
-                        Log("파일 선택 다이얼로그 감지됨!");
-                        Task.Run(async () => {
-                            try 
-                            {
-                                await client.SendAsync("Page.handleFileChooser", new 
-                                { 
-                                    action = "accept", 
-                                    files = new[] { imagePath } 
-                                });
-                                fileChooserTcs.TrySetResult(true);
-                            }
-                            catch (Exception ex)
-                            {
-                                Log($"파일 선택 처리 실패: {ex.Message}");
-                                fileChooserTcs.TrySetResult(false);
-                            }
-                        });
+                // 1단계: 메인 업로드 메뉴만 먼저 열기 (서브메뉴 클릭 X)
+                var menuOpened = await _page.EvaluateFunctionAsync<bool>(@"() => {
+                    const selectors = [
+                        'button[aria-label=""파일 업로드 메뉴 열기""]',
+                        'button[aria-label=""Open file upload menu""]',
+                        'button.upload-card-button',
+                        'button[aria-label*=""업로드""]'
+                    ];
+                    for (const sel of selectors) {
+                        const btn = document.querySelector(sel);
+                        if (btn) { 
+                            btn.click(); 
+                            return true; 
+                        }
                     }
-                }
-                
-                client.MessageReceived += OnFileChooserOpened;
-                
-                // 업로드 버튼 클릭 (다이얼로그 트리거)
-                await _page.EvaluateFunctionAsync(@"() => {
-                    const btn = document.querySelector('button[aria-label*=""업로드""], button.upload-card-button');
-                    if (btn) btn.click();
+                    return false;
                 }");
                 
-                // 처리 대기 (5초 타임아웃)
-                var completedTask = await Task.WhenAny(fileChooserTcs.Task, Task.Delay(5000));
-                
-                // 정리
-                client.MessageReceived -= OnFileChooserOpened;
-                await client.SendAsync("Page.setInterceptFileChooserDialog", new { enabled = false });
-                
-                if (completedTask == fileChooserTcs.Task && await fileChooserTcs.Task)
+                if (!menuOpened)
                 {
-                    await WaitForImageUploadAsync(10);
-                    Log($"CDP Interception으로 업로드 완료: {System.IO.Path.GetFileName(imagePath)}");
+                    Log("업로드 메뉴 버튼을 찾을 수 없음");
+                    throw new Exception("Upload menu button not found");
+                }
+                
+                await Task.Delay(500); // 메뉴 열림 대기
+                Log("메인 메뉴 열림, FileChooser 리스너 등록 후 서브메뉴 클릭...");
+                
+                // 2단계: FileChooser 리스너를 먼저 등록 (중요!)
+                var fileChooserTask = _page.WaitForFileChooserAsync();
+                
+                // 3단계: 서브메뉴(파일 업로드) 클릭 → 이 순간 input[type=file] 생성 + 다이얼로그 트리거
+                var submenuClicked = await _page.EvaluateFunctionAsync<bool>(@"() => {
+                    const selectors = [
+                        'button[aria-label=""파일 업로드. 문서, 데이터, 코드 파일""]',
+                        'button[aria-label*=""파일 업로드""]',
+                        'button[aria-label*=""Upload file""]',
+                        'button[aria-label=""File upload. Documents, data files, or code""]'
+                    ];
+                    for (const sel of selectors) {
+                        const btn = document.querySelector(sel);
+                        if (btn) { 
+                            btn.click(); 
+                            return true; 
+                        }
+                    }
+                    return false;
+                }");
+                
+                if (!submenuClicked)
+                {
+                    Log("서브메뉴를 찾을 수 없음");
+                    throw new Exception("Submenu button not found");
+                }
+                
+                // 4단계: 5초 타임아웃으로 FileChooser 대기
+                var completedTask = await Task.WhenAny(fileChooserTask, Task.Delay(5000));
+                if (completedTask != fileChooserTask)
+                {
+                    throw new TimeoutException("FileChooser 대기 타임아웃");
+                }
+                
+                // FileChooser가 열리면 파일 자동 주입 (네이티브 다이얼로그 대신)
+                var fileChooser = await fileChooserTask;
+                await fileChooser.AcceptAsync(new[] { imagePath });
+                
+                Log("FileChooser 인터셉트 성공 → 파일 자동 주입됨");
+                
+                // 업로드 완료 대기
+                if (await WaitForImageUploadAsync(60))
+                {
+                    Log($"파일 업로드 완료 (FileChooser): {filename}");
                     return true;
                 }
                 else
                 {
-                    Log("CDP Interception 타임아웃 또는 실패");
+                    Log("FileChooser 업로드 후 첨부 확인 실패, 다음 방법 시도...");
+                }
+            }
+            catch (TimeoutException)
+            {
+                Log("FileChooser 대기 타임아웃 (다이얼로그가 트리거되지 않음), 다음 방법 시도...");
+            }
+            catch (Exception ex)
+            {
+                Log($"FileChooser 인터셉트 실패: {ex.Message}");
+            }
+            
+            // ============================================================
+            // 방법 2: 기존 input[type=file] 직접 접근 (이미 존재하는 경우)
+            // ============================================================
+            try
+            {
+                Log("[2차] 기존 input[type=file] 직접 접근 시도...");
+                
+                // 숨겨진 input[type=file] 찾기 (최대 2초, 200ms 간격)
+                IElementHandle? fileInput = null;
+                for (int i = 0; i < 10; i++)
+                {
+                    var inputs = await _page.QuerySelectorAllAsync("input[type='file']");
+                    if (inputs.Any())
+                    {
+                        fileInput = inputs.Last();
+                        Log($"input[type=file] 발견 (시도 {i + 1}/10)");
+                        break;
+                    }
+                    await Task.Delay(200);
+                }
+                
+                if (fileInput != null)
+                {
+                    // UploadFileAsync는 다이얼로그를 열지 않고 직접 파일 설정
+                    await fileInput.UploadFileAsync(imagePath);
+                    
+                    // ESC로 혹시 열린 다이얼로그 닫기
+                    await Task.Delay(300);
+                    try { await _page.Keyboard.PressAsync("Escape"); } catch { }
+                    await Task.Delay(200);
+                    
+                    if (await WaitForImageUploadAsync(60))
+                    {
+                        Log($"파일 업로드 완료 (Native): {filename}");
+                        return true;
+                    }
+                    else
+                    {
+                        Log("Native 업로드 후 첨부 확인 실패, 다음 방법 시도...");
+                    }
+                }
+                else
+                {
+                    Log("input[type=file] 요소를 찾을 수 없음");
                 }
             }
             catch (Exception ex)
             {
-                Log($"CDP Interception 오류: {ex.Message}");
+                Log($"Native 업로드 실패: {ex.Message}");
             }
             
+            // ============================================================
+            // 방법 3: JavaScript DataTransfer 폴백 (최후의 수단)
+            // ============================================================
+            try
+            {
+                Log("[3차] JavaScript DataTransfer 폴백 시도...");
+                
+                // NanoBanana 스크립트 주입
+                await InjectNanoBananaScriptAsync();
+                
+                // 이미지를 Base64로 변환
+                var imageBytes = await System.IO.File.ReadAllBytesAsync(imagePath);
+                var base64 = Convert.ToBase64String(imageBytes);
+                
+                // JavaScript를 통해 DataTransfer로 파일 주입
+                var result = await _page.EvaluateFunctionAsync<System.Text.Json.JsonElement>(@"
+                    async (base64Data, filename) => {
+                        if (typeof window.NanoBanana === 'undefined') {
+                            return { success: false, message: 'NanoBanana not loaded' };
+                        }
+                        return await window.NanoBanana.uploadImageFromPath(base64Data, filename);
+                    }", base64, filename);
+                
+                if (result.TryGetProperty("success", out var successProp) && successProp.GetBoolean())
+                {
+                    Log($"파일 업로드 완료 (DataTransfer): {filename}");
+                    await WaitForImageUploadAsync(60);
+                    return true;
+                }
+                else
+                {
+                    var errorMsg = result.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "알 수 없는 오류";
+                    Log($"DataTransfer 업로드 실패: {errorMsg}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"DataTransfer 오류: {ex.Message}");
+            }
+            
+            Log("모든 업로드 방법 실패");
             return false;
         }
         catch (Exception ex)
@@ -1075,6 +1501,196 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
     }
     
     /// <summary>
+    /// 지능형 재시도 및 프롬프트 폴백이 포함된 향상된 워크플로우
+    /// 파이썬 스크립트 분석 결과 기반으로 구현됨
+    /// </summary>
+    /// <param name="imagePath">원본 이미지 경로</param>
+    /// <param name="fullPrompt">OCR 텍스트가 포함된 전체 프롬프트</param>
+    /// <param name="simplePrompt">OCR 텍스트가 없는 단순 프롬프트 (폴백용)</param>
+    /// <param name="useProMode">Pro 모드 사용 여부</param>
+    /// <param name="deleteOnSuccess">성공 시 채팅 삭제 여부</param>
+    public async Task<(bool Success, string? ResultBase64)> RunFullWorkflowWithRetryAsync(
+        string imagePath, 
+        string fullPrompt, 
+        string simplePrompt, 
+        bool useProMode = true,
+        bool deleteOnSuccess = true)
+    {
+        if (_page == null || _page.IsClosed)
+        {
+            Log("오류: 브라우저 연결이 끊어졌습니다.");
+            return (false, null);
+        }
+        
+        const int maxRetries = 3;
+        const int downloadRetries = 2; // 재생성 시도 최소화 (5 -> 2)
+        string? resultBase64 = null;
+        int consecutiveUploadFailures = 0; // 연속 업로드 실패 카운터
+        
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                Log($"[시도 {attempt}/{maxRetries}] 워크플로우 실행 중...");
+                
+                // 연속 업로드 실패 2회 시 페이지 새로고침 (JavaScript 상태 초기화)
+                if (consecutiveUploadFailures >= 2)
+                {
+                    Log("⚠️ 연속 업로드 실패 감지 - 페이지 상태 초기화...");
+                    await ResetPageStateAsync();
+                    consecutiveUploadFailures = 0;
+                    await Task.Delay(2000);
+                }
+                
+                if (attempt > 1)
+                {
+                    // 재시도 시 10초 대기 (429 오류 방지)
+                    Log($"재시도 전 10초 대기 (서버 부하 방지)...");
+                    await Task.Delay(10000);
+                    
+                    // 새 채팅 시작
+                    await StartNewChatAsync();
+                    await Task.Delay(3000);
+                    
+                    // Pro 모드 및 이미지 생성 재활성화
+                    if (useProMode) await SelectProModeAsync();
+                    await EnableImageGenerationAsync();
+                }
+                else
+                {
+                    // 첫 시도: 기본 설정
+                    if (useProMode) await SelectProModeAsync();
+                    await EnableImageGenerationAsync();
+                }
+                
+                // 이미지 업로드
+                if (!await UploadImageAsync(imagePath))
+                {
+                    Log("업로드 실패 - 재시도 필요");
+                    consecutiveUploadFailures++;
+                    continue;
+                }
+                await Task.Delay(1000);
+                
+                // ============================================================
+                // [핵심] 메시지 전송 전 이미지 첨부 검증 (이미지 없이 전송 방지)
+                // ============================================================
+                if (!await IsImageAttachedAsync())
+                {
+                    Log("⚠️ 업로드 후 이미지 첨부 확인 실패 - 재시도 필요");
+                    consecutiveUploadFailures++;
+                    continue;
+                }
+                
+                // 업로드 성공 - 연속 실패 카운터 초기화
+                consecutiveUploadFailures = 0;
+                Log("✓ 이미지 첨부 확인됨");
+                
+                // 프롬프트 선택: 1-2회차는 전체 프롬프트, 3회차는 단순 프롬프트
+                string currentPrompt = attempt <= 2 ? fullPrompt : simplePrompt;
+                if (attempt > 2) Log("폴백: 단순화된 프롬프트 사용");
+                
+                // 프롬프트 전송
+                if (!await SendMessageAsync(currentPrompt))
+                {
+                    Log("프롬프트 전송 실패 - 재시도 필요");
+                    continue;
+                }
+                
+                // 응답 대기
+                var response = await WaitForResponseAsync();
+                if (string.IsNullOrEmpty(response))
+                {
+                    Log("응답 실패 - 단순 프롬프트로 재전송 시도...");
+                    
+                    // 응답 실패 시 같은 대화에서 단순 프롬프트로 재시도
+                    await Task.Delay(2000);
+                    if (await SendMessageAsync(simplePrompt))
+                    {
+                        response = await WaitForResponseAsync();
+                        if (!string.IsNullOrEmpty(response))
+                        {
+                            Log("단순 프롬프트 재전송 성공!");
+                        }
+                    }
+                    
+                    if (string.IsNullOrEmpty(response))
+                    {
+                        continue;
+                    }
+                }
+                
+                // 다운로드 재시도 로직 (최대 5회)
+                for (int dlAttempt = 1; dlAttempt <= downloadRetries; dlAttempt++)
+                {
+                    resultBase64 = await GetGeneratedImageBase64Async();
+                    
+                    if (!string.IsNullOrEmpty(resultBase64))
+                    {
+                        Log($"이미지 추출 성공!");
+                        break;
+                    }
+                    
+                    if (dlAttempt < downloadRetries)
+                    {
+                        Log($"이미지 추출 실패 - 재생성 시도 ({dlAttempt}/{downloadRetries})");
+                        
+                        // 1-2회: 전체 프롬프트, 3-5회: 단순 프롬프트
+                        string retryPrompt = dlAttempt <= 2 ? fullPrompt : simplePrompt;
+                        if (dlAttempt > 2) Log("다운로드 폴백: 단순 프롬프트로 재생성");
+                        
+                        if (await SendMessageAsync(retryPrompt))
+                        {
+                            await WaitForResponseAsync();
+                        }
+                        await Task.Delay(2000);
+                    }
+                }
+                
+                if (!string.IsNullOrEmpty(resultBase64))
+                {
+                    Log("워크플로우 성공!");
+                    
+                    // 성공 시 채팅 삭제 (브라우저 메모리 관리)
+                    if (deleteOnSuccess)
+                    {
+                        try
+                        {
+                            if (await DeleteCurrentChatAsync())
+                            {
+                                Log("채팅 정리 완료");
+                            }
+                        }
+                        catch
+                        {
+                            // 채팅 삭제 실패해도 결과에 영향 없음
+                            Log("채팅 삭제 실패 (무시됨)");
+                        }
+                    }
+                    
+                    return (true, resultBase64);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"시도 {attempt} 오류: {ex.Message}");
+            }
+        }
+        
+        // 모든 시도 실패
+        Log($"워크플로우 실패: {maxRetries}회 시도 모두 실패");
+        
+        // 실패해도 메인 페이지로 복귀
+        try
+        {
+            await NavigateToGeminiAsync();
+        }
+        catch { }
+        
+        return (false, resultBase64);
+    }
+    
+    /// <summary>
     /// 생성된 이미지를 Base64로 추출
     /// </summary>
     public async Task<string?> GetGeneratedImageBase64Async()
@@ -1085,7 +1701,7 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
         {
             await InjectNanoBananaScriptAsync();
             
-            var result = await _page.EvaluateFunctionAsync<JObject>(@"
+            var result = await _page.EvaluateFunctionAsync<System.Text.Json.JsonElement>(@"
                 async () => {
                     if (typeof window.NanoBanana === 'undefined') {
                         return { success: false, base64: null };
@@ -1093,9 +1709,13 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
                     return await window.NanoBanana.getGeneratedImageBase64();
                 }");
                 
-            if (result != null && result["success"]?.Value<bool>() == true)
+            // System.Text.Json.JsonElement 방식으로 접근
+            if (result.TryGetProperty("success", out var successProp) && successProp.GetBoolean())
             {
-                return result["base64"]?.ToString();
+                if (result.TryGetProperty("base64", out var base64Prop) && base64Prop.ValueKind != System.Text.Json.JsonValueKind.Null)
+                {
+                    return base64Prop.GetString();
+                }
             }
             
             return null;
@@ -1131,14 +1751,21 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
                 }
             }
             
-            // URL인 경우 다운로드
+            // URL인 경우 쿠키 포함하여 원본 크기로 다운로드
             if (base64Data.StartsWith("http"))
             {
-                Log($"URL에서 이미지 다운로드: {base64Data}");
-                using var client = new System.Net.Http.HttpClient();
-                var bytes = await client.GetByteArrayAsync(base64Data);
+                // 원본 크기 URL로 변환
+                var originalSizeUrl = ConvertToOriginalSizeUrl(base64Data);
+                Log($"URL에서 원본 크기 이미지 다운로드: {originalSizeUrl.Substring(0, Math.Min(80, originalSizeUrl.Length))}...");
+                
+                var bytes = await DownloadWithCookiesAsync(originalSizeUrl);
+                if (bytes == null || bytes.Length == 0)
+                {
+                    Log("다운로드 실패 - 쿠키 인증 필요");
+                    return false;
+                }
                 await System.IO.File.WriteAllBytesAsync(outputPath, bytes);
-                Log($"이미지 저장 완료: {outputPath}");
+                Log($"이미지 저장 완료: {outputPath} ({bytes.Length / 1024}KB)");
                 return true;
             }
             
@@ -1188,16 +1815,141 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable
         }
     }
     
+    /// <summary>
+    /// 이미지 URL을 원본 크기(=s0)로 변환합니다.
+    /// </summary>
+    private static string ConvertToOriginalSizeUrl(string url)
+    {
+        if (string.IsNullOrEmpty(url)) return url;
+        
+        // googleusercontent URL의 크기 파라미터 패턴
+        // 예: =s160, =w160-h160, =s160-w160-h160-n-rj-v1
+        var regex = new System.Text.RegularExpressions.Regex(@"=s\d+.*$|=w\d+.*$");
+        
+        if (regex.IsMatch(url))
+        {
+            return regex.Replace(url, "=s0");
+        }
+        
+        // 파라미터가 없으면 =s0 추가
+        if (!url.Contains("="))
+        {
+            return url + "=s0";
+        }
+        
+        return url;
+    }
+
+    /// <summary>
+    /// 브라우저 세션 쿠키를 사용하여 URL에서 이미지를 다운로드합니다.
+    /// </summary>
+    private async Task<byte[]?> DownloadWithCookiesAsync(string url)
+    {
+        if (_page == null) return null;
+        
+        try
+        {
+            // 1. 브라우저에서 쿠키 가져오기
+            var cookies = await GetCookiesAsync();
+            
+            // 2. HttpClient 설정
+            var handler = new System.Net.Http.HttpClientHandler
+            {
+                CookieContainer = new System.Net.CookieContainer(),
+                UseCookies = true
+            };
+            
+            // 3. 쿠키 추가 (Google 도메인 포함)
+            foreach (var cookie in cookies)
+            {
+                try
+                {
+                    handler.CookieContainer.Add(new System.Net.Cookie(
+                        cookie.Name, 
+                        cookie.Value, 
+                        cookie.Path ?? "/", 
+                        cookie.Domain ?? ".google.com"));
+                }
+                catch { }
+            }
+            
+            using var client = new System.Net.Http.HttpClient(handler);
+            client.Timeout = TimeSpan.FromSeconds(30);
+            
+            // 4. 브라우저 헤더 설정
+            client.DefaultRequestHeaders.Add("User-Agent", 
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36");
+            client.DefaultRequestHeaders.Add("Accept", "image/*,*/*");
+            client.DefaultRequestHeaders.Add("Referer", "https://gemini.google.com/");
+            
+            // 5. 다운로드
+            var response = await client.GetAsync(url);
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadAsByteArrayAsync();
+        }
+        catch (Exception ex)
+        {
+            Log($"쿠키 인증 다운로드 실패: {ex.Message}");
+            return null;
+        }
+    }
+    
     #endregion
     
-    #region IDisposable
+    #region IDisposable / IAsyncDisposable
     
+    /// <summary>
+    /// 비동기 리소스 정리 (권장)
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        if (_isDisposed) return;
+        _isDisposed = true;
+        
+        Log("리소스 정리 중...");
+        
+        // 페이지 정리
+        if (_page != null && !_page.IsClosed)
+        {
+            try { await _page.CloseAsync(); } catch { }
+        }
+        _page = null;
+        
+        // 브라우저 정리 (Disconnect만 - Close 시 브라우저 창이 닫힘)
+        if (_browser != null)
+        {
+            try { _browser.Disconnected -= OnBrowserClosed; } catch { }
+            try { _browser.Disconnect(); } catch { }
+            try { _browser.Dispose(); } catch { }
+        }
+        _browser = null;
+        
+        Log("리소스 정리 완료");
+    }
+    
+    /// <summary>
+    /// 동기 리소스 정리 (IDisposable 호환)
+    /// </summary>
     public void Dispose()
     {
-        _browser?.Disconnect();
-        _browser?.Dispose();
-        _browser = null;
+        if (_isDisposed) return;
+        _isDisposed = true;
+        
+        // 페이지 정리
+        if (_page != null && !_page.IsClosed)
+        {
+            try { _page.CloseAsync().GetAwaiter().GetResult(); } catch { }
+        }
         _page = null;
+        
+        // 브라우저 정리
+        if (_browser != null)
+        {
+            try { _browser.Disconnected -= OnBrowserClosed; } catch { }
+            try { _browser.Disconnect(); } catch { }
+            try { _browser.Dispose(); } catch { }
+        }
+        _browser = null;
     }
     
     #endregion

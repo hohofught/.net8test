@@ -421,6 +421,26 @@ namespace GeminiWebTranslator
         public Task<bool> DownloadResultImageAsync() => Task.FromResult(false);
 
         /// <summary>
+        /// Gemini 응답 생성을 중지합니다.
+        /// </summary>
+        public async Task<bool> StopGeminiResponseAsync()
+        {
+            try
+            {
+                var page = await GetPageAsync();
+                Log("Gemini 응답 생성 중지 시도...");
+                var result = await page.EvaluateExpressionAsync<string>(GeminiScripts.StopGeminiResponseScript);
+                Log($"중지 결과: {result}");
+                return result != "no_stop_button_found";
+            }
+            catch (Exception ex)
+            {
+                Log($"응답 중지 오류: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
         /// 현재 브라우저의 전반적인 상태를 진단하여 열거된 상태 값을 반환합니다.
         /// </summary>
         public async Task<WebViewDiagnostics> DiagnoseAsync()

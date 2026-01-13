@@ -115,6 +115,56 @@ namespace GeminiWebTranslator.Automation
         ";
 
         /// <summary>
+        /// Gemini 응답 생성 중지 스크립트
+        /// 생성 중일 때 중지 버튼을 클릭하여 응답을 멈춥니다.
+        /// </summary>
+        public const string StopGeminiResponseScript = @"
+            (function() {
+                try {
+                    // 1. Send 버튼이 Stop 상태인 경우 (가장 일반적)
+                    var sendBtn = document.querySelector('.send-button.stop');
+                    if (sendBtn && sendBtn.offsetParent !== null && !sendBtn.disabled) {
+                        sendBtn.click();
+                        return 'stopped_via_send_button';
+                    }
+                    
+                    // 2. 별도의 중지 버튼 검색
+                    var stopSelectors = [
+                        'button[aria-label*=""중지""]',
+                        'button[aria-label*=""Stop""]',
+                        'button[aria-label=""대답 생성 중지""]',
+                        'button[aria-label=""Stop generating""]'
+                    ];
+                    
+                    for (var i = 0; i < stopSelectors.length; i++) {
+                        var btn = document.querySelector(stopSelectors[i]);
+                        if (btn && btn.offsetParent !== null && !btn.disabled) {
+                            btn.click();
+                            return 'stopped_via_selector';
+                        }
+                    }
+                    
+                    // 3. mat-icon으로 stop 검색 (Material Design 아이콘)
+                    var icons = document.querySelectorAll('mat-icon');
+                    for (var j = 0; j < icons.length; j++) {
+                        var icon = icons[j];
+                        if (icon.textContent === 'stop' || icon.textContent === 'stop_circle') {
+                            var parentBtn = icon.closest('button');
+                            if (parentBtn && parentBtn.offsetParent !== null && !parentBtn.disabled) {
+                                parentBtn.click();
+                                return 'stopped_via_mat_icon';
+                            }
+                        }
+                    }
+                    
+                    return 'no_stop_button_found';
+                } catch (e) {
+                    return 'error: ' + e.message;
+                }
+            })();
+        ";
+
+        /// <summary>
         /// 다음 입력 대기 상태 확인
         /// </summary>
         public const string IsReadyForNextInputScript = @"
@@ -303,6 +353,65 @@ namespace GeminiWebTranslator.Automation
                 document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
                 return 'item_not_found_for_' + targetModel;
             })";
+
+        #endregion
+
+        #region 외부 스크립트 로딩
+
+        /// <summary>
+        /// 스크립트 파일 경로 반환
+        /// </summary>
+        private static string GetScriptPath(string filename)
+        {
+            return System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Resources", "Scripts", filename);
+        }
+
+        /// <summary>
+        /// GeminiCommon.js (공유 유틸리티) 로드
+        /// </summary>
+        public static string LoadGeminiCommonScript()
+        {
+            var path = GetScriptPath("GeminiCommon.js");
+            return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : "";
+        }
+
+        /// <summary>
+        /// BrowserModeAutomation.js (브라우저 모드 전용) 로드
+        /// </summary>
+        public static string LoadBrowserModeScript()
+        {
+            var path = GetScriptPath("BrowserModeAutomation.js");
+            return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : "";
+        }
+
+        /// <summary>
+        /// NanoBananaAutomation.js (이미지 처리 전용) 로드
+        /// </summary>
+        public static string LoadNanoBananaScript()
+        {
+            var path = GetScriptPath("NanoBananaAutomation.js");
+            return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : "";
+        }
+
+        /// <summary>
+        /// 브라우저 모드에 필요한 모든 스크립트 로드 (GeminiCommon + BrowserModeAutomation)
+        /// </summary>
+        public static string LoadAllBrowserModeScripts()
+        {
+            var common = LoadGeminiCommonScript();
+            var browserMode = LoadBrowserModeScript();
+            return $"{common}\n\n{browserMode}";
+        }
+
+        /// <summary>
+        /// NanoBanana에 필요한 모든 스크립트 로드 (GeminiCommon + NanoBanana)
+        /// </summary>
+        public static string LoadAllNanoBananaScripts()
+        {
+            var common = LoadGeminiCommonScript();
+            var nanoBanana = LoadNanoBananaScript();
+            return $"{common}\n\n{nanoBanana}";
+        }
 
         #endregion
 
