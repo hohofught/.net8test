@@ -3,6 +3,8 @@ name: .NET Build & Release
 on:
   push:
     branches: [ "main", "master" ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
@@ -28,8 +30,24 @@ jobs:
     - name: Publish
       run: dotnet publish -c Release -r win-x64 --self-contained false -o ./publish
 
+    # Resources 폴더와 실행파일을 압축하기 위해 PowerShell 사용
+    - name: Zip Release
+      shell: pwsh
+      run: |
+        Compress-Archive -Path ./publish/* -DestinationPath ./GeminiWebTranslator_win-x64.zip
+
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: GeminiWebTranslator_v${{ github.run_number }}
         path: ./publish
+
+    # 태그가 푸시되었을 때만 Release 생성 및 파일 업로드
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: GeminiWebTranslator_win-x64.zip
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
