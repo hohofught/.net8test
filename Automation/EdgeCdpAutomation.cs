@@ -619,7 +619,7 @@ public class EdgeCdpAutomation : IGeminiAutomation, IDisposable, IAsyncDisposabl
         }
     }
     
-    public async Task<bool> SendMessageAsync(string message)
+    public async Task<bool> SendMessageAsync(string message, bool preserveAttachment = false)
     {
         if (_page == null) return false;
         

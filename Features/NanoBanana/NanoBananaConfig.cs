@@ -19,14 +19,23 @@ public class NanoBananaConfig
     
     #region 프롬프트 설정
     
-    public string Prompt { get; set; } = 
-        "**당신은 매우 뛰어난 번역전문가입니다.**, **당신은 번역전문가로써 임하기 위해 원본 사진을 최대한 유지해야 합니다**  번역전문가로써 **중국어 텍스트를 한국어로 자연스럽고 깔끔하게 번역하며 원문 스타일(폰트,색상)을 유지해야합니다**. 하지만 왼쪽 상단에 당신의 만든작품에 이상한 워터마크가 있습니다. 당신의 작품인데 이상한 워터마크는 사라저야합니다.  *{ocr_text}*.";
+    /// <summary>기본 프롬프트 - NanoBanana 설정에서 변경 가능</summary>
+    public static string GetDefaultPrompt() => 
+        "**당신은 매우뛰어난 번역전문가입니다.** 번역전문가로 써 중국어 텍스트를 한국어로 번역하며 원문 스타일(폰트,색상)을 유지해야합니다. 하지만 왼쪽 상단에 당신의 만든작품에 이상한 워터마크가 있습니다. 당신의 작품인데 이상한 워터마크는 사라저야합니다. *{ocr_text}*.";
+    
+    public string Prompt { get; set; } = GetDefaultPrompt();
     
     /// <summary>플레이스홀더({ocr_text})가 포함된 프롬프트 템플릿</summary>
     public string PromptTemplate { get; set; } = Services.PromptService.BuildNanoBananaPrompt("{ocr_text}");
     
     /// <summary>템플릿 사용 시 {ocr_text}를 변환하고, 미사용 시 기본 프롬프트 뒤에 OCR 결과를 덧붙임</summary>
     public bool UsePromptTemplate { get; set; } = true;
+    
+    /// <summary>프롬프트를 기본값으로 리셋</summary>
+    public void ResetPromptToDefault()
+    {
+        Prompt = GetDefaultPrompt();
+    }
     
     public string BuildPrompt(string? ocrText = null)
     {
@@ -79,7 +88,7 @@ public class NanoBananaConfig
     #region 실행 파라미터
     
     public int MaxRetries { get; set; } = 3;             // 실패 시 재시도 횟수
-    public int WaitBetweenImages { get; set; } = 3;      // 이미지 처리 사이 대기(초)
+    public int WaitBetweenImages { get; set; } = 1;      // 이미지 처리 사이 대기(초) - 최적화됨
     public int ResponseTimeout { get; set; } = 120;      // Gemini 응답 타임아웃(초)
     public int DebugPort { get; set; } = 9333;           // 브라우저 CDP 제어 포트
     

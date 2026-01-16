@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Newtonsoft.Json.Linq;
+using GeminiWebTranslator.Services;
 
 namespace GeminiWebTranslator.Forms;
 
@@ -16,89 +17,32 @@ namespace GeminiWebTranslator.Forms;
 /// </summary>
 public partial class MainForm
 {
-    // BtnSetupCookies_Click was integrated into HttpSettingsForm and removed from here.
-
-    private void BtnLoadFile_Click(object? sender, EventArgs e)
+    /// <summary>
+    /// 초기화 버튼 클릭
+    /// </summary>
+    private void BtnClear_Click(object? sender, EventArgs e)
     {
+        txtInput.Clear();
+        txtOutput.Clear();
+        
         if (isFileMode)
         {
-            isFileMode = false; loadedFilePath = null; loadedJsonData = null; loadedTsvLines = null;
-            txtInput.ReadOnly = false; txtInput.Text = "";
-            btnLoadFile.Text = "📁 파일 열기"; btnSaveFile.Enabled = false;
-            UpdateStatus("파일 닫힘", Color.Yellow);
-            return;
+            // 파일 모드 해제
+            isFileMode = false;
+            loadedFilePath = null;
+            loadedJsonData = null;
+            loadedTsvLines = null;
+            txtInput.ReadOnly = false;
         }
-
-        var ofd = new OpenFileDialog { Filter = "지원 파일 (*.json;*.tsv)|*.json;*.tsv|모든 파일|*.*" };
-        if (ofd.ShowDialog() != DialogResult.OK) return;
-
-        try
-        {
-            loadedFilePath = ofd.FileName;
-            var ext = Path.GetExtension(loadedFilePath).ToLower();
-            
-            if (ext == ".json")
-            {
-                loadedJsonData = JToken.Parse(File.ReadAllText(loadedFilePath, Encoding.UTF8));
-                txtInput.Text = $"[파일 모드] JSON ({loadedFilePath})\n'번역하기' 클릭";
-                isFileMode = true;
-            }
-            else if (ext == ".tsv")
-            {
-                loadedTsvLines = File.ReadAllLines(loadedFilePath, Encoding.UTF8).ToList();
-                txtInput.Text = $"[파일 모드] TSV ({loadedTsvLines.Count}행)\n'번역하기' 클릭";
-                isFileMode = true;
-            }
-            else { MessageBox.Show("지원하지 않는 형식", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
-
-            // [New Feature] Prompt Customization & Preview
-            CustomTranslationPrompt = null; // Reset previous prompt
-            var linesForPreview = loadedTsvLines ?? loadedJsonData?.ToString().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).ToList();
-            
-            if (linesForPreview != null && linesForPreview.Count > 0)
-            {
-                // Create generator (it handles connection state internally)
-                var generator = CreateAiGenerator();
-                var targetLang = cmbTargetLang.SelectedItem?.ToString()?.Split('(')[0].Trim() ?? "한국어";
-                
-                using (var promptForm = new GeminiWebTranslator.Forms.PromptCustomizationForm(
-                    linesForPreview, generator, targetLang, currentSettings.Glossary))
-                {
-                    if (promptForm.ShowDialog() == DialogResult.OK)
-                    {
-                        CustomTranslationPrompt = promptForm.GeneratedPrompt;
-                        UpdateStatus("[성공] 커스텀 프롬프트 설정됨", Color.LightGreen);
-                        AppendLog($"[Info] 커스텀 프롬프트 적용됨: {CustomTranslationPrompt.Substring(0, Math.Min(50, CustomTranslationPrompt.Length))}...");
-                    }
-                }
-            }
-
-            txtInput.ReadOnly = true; btnLoadFile.Text = "파일 닫기"; btnSaveFile.Enabled = false;
-            UpdateStatus("파일 로드됨", Color.Cyan);
-        }
-        catch (Exception ex) { MessageBox.Show($"로드 실패: {ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); }
-    }
-
-    private void BtnSaveFile_Click(object? sender, EventArgs e)
-    {
-        if (!isFileMode || loadedFilePath == null) return;
-        var sfd = new SaveFileDialog { Filter = "JSON|*.json|TSV|*.tsv", FileName = "translated_" + Path.GetFileName(loadedFilePath) };
-        if (sfd.ShowDialog() != DialogResult.OK) return;
-
-        try
-        {
-            if (loadedJsonData != null) File.WriteAllText(sfd.FileName, loadedJsonData.ToString(), Encoding.UTF8);
-            else if (loadedTsvLines != null) File.WriteAllLines(sfd.FileName, loadedTsvLines, Encoding.UTF8);
-            MessageBox.Show("저장 완료!", "알림", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-        catch (Exception ex) { MessageBox.Show($"저장 실패: {ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        
+        httpClient?.ResetSession();
+        UpdateStatus("초기화됨", UiTheme.ColorWarning);
     }
 
     private async Task ProcessFileTranslationAsync(string targetLang, string style)
     {
         try
         {
-            // 0. Setup Generator for pre-conditioning
             // 0. Setup Generator for pre-conditioning
             var generator = CreateAiGenerator();
 
@@ -115,7 +59,7 @@ public partial class MainForm
             { 
                 await ProcessTsvBatchTranslationAsync(targetLang, style); 
             }
-            btnSaveFile.Enabled = true;
+            AppendLog("[파일 번역] 완료");
             UpdateStatus("[성공] 파일 번역 완료", Color.Green);
         }
         catch (Exception ex) { txtOutput.Text += $"\n\n오류: {ex.Message}"; UpdateStatus("[실패] 오류", Color.Red); throw; }
@@ -147,17 +91,13 @@ public partial class MainForm
              }
         }
 
-        // 2. Setup Generator with Browser Error Recovery
+        // 2. Setup Generator
         Func<string, Task<string>> generator = async (prompt) =>
         {
-            // Try current mode first
             try
             {
                 if (useWebView2Mode && automation != null) 
                     return await automation.GenerateContentAsync(prompt);
-                
-                if (useBrowserMode && browserAutomation != null) 
-                    return await browserAutomation.GenerateContentAsync(prompt);
 
                 if (chkHttpMode.Checked && httpClient?.IsInitialized == true)
                 {
@@ -165,17 +105,9 @@ public partial class MainForm
                     return await httpClient.GenerateContentAsync(prompt);
                 }
             }
-            catch (PuppeteerSharp.TargetClosedException ex)
-            {
-                AppendLog($"[ERROR] 브라우저 연결 끊김: {ex.Message}");
-                browserAutomation = null;
-                useBrowserMode = false;
-                throw new Exception("브라우저 연결이 끊어졌습니다. 모드를 다시 설정해주세요.");
-            }
             catch (Exception ex) when (ex.Message.Contains("Target closed") || ex.Message.Contains("disconnected"))
             {
                 AppendLog($"[ERROR] 연결 중단: {ex.Message}");
-                if (useBrowserMode) { browserAutomation = null; useBrowserMode = false; }
                 throw new Exception("연결이 중단되었습니다. 상태를 확인해주세요.");
             }
             
@@ -188,17 +120,6 @@ public partial class MainForm
             {
                 if (useWebView2Mode && automation != null) 
                     await automation.StartNewChatAsync();
-                else if (useBrowserMode && browserAutomation != null) 
-                {
-                    try { await browserAutomation.StartNewChatAsync(); } 
-                    catch (PuppeteerSharp.TargetClosedException) 
-                    { 
-                        AppendLog("[WARN] 브라우저 세션 초기화 실패 - 연결 끊김");
-                        browserAutomation = null;
-                        useBrowserMode = false;
-                    }
-                    catch (Exception ex) { AppendLog($"[WARN] 세션 초기화 실패: {ex.Message}"); }
-                }
                 else if (httpClient?.IsInitialized == true) 
                     httpClient.ResetSession();
             }
@@ -304,8 +225,4 @@ public partial class MainForm
              translationService.OnStatus -= onStatus;
         }
     }
-
-    // TranslateSingleItemAsync is no longer needed but if referenced elsewhere, keep it?
-    // It's private and was only used here. I have replaced usages. I can remove it.
-
 }

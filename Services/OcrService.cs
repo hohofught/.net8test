@@ -459,47 +459,221 @@ namespace GeminiWebTranslator.Services
                 catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"전체 추출 오류: {ex.Message}"); return ""; }
             });
         }
+        
+        /// <summary>
+        /// OCR 결과를 워터마크와 콘텐츠로 분리하여 반환
+        /// Gemini에게 정확한 제거 대상을 알려주기 위함
+        /// </summary>
+        public async Task<OcrSeparatedResult> ExtractTextWithWatermarkInfoAsync(string imagePath)
+        {
+            var result = new OcrSeparatedResult();
+            if (!_isInitialized && !await InitializeAsync()) return result;
+
+            await Task.Run(() =>
+            {
+                try
+                {
+                    using var bmp = new System.Drawing.Bitmap(imagePath);
+                    var data = bmp.LockBits(new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height), 
+                        System.Drawing.Imaging.ImageLockMode.ReadOnly, 
+                        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                    var imgStruct = new ImageStructure { type = 3, width = bmp.Width, height = bmp.Height, step_size = data.Stride, data_ptr = data.Scan0 };
+
+                    long resultHandle;
+                    if (RunOcrPipeline(_pipeline, ref imgStruct, _procOpts, out resultHandle) != 0) 
+                    { 
+                        bmp.UnlockBits(data); 
+                        return; 
+                    }
+                    bmp.UnlockBits(data);
+
+                    GetOcrLineCount(resultHandle, out long count);
+                    
+                    for (long i = 0; i < count; i++)
+                    {
+                        GetOcrLine(resultHandle, i, out long lineHandle);
+                        GetOcrLineContent(lineHandle, out IntPtr ptr);
+                        string? line = Marshal.PtrToStringUTF8(ptr);
+                        
+                        if (string.IsNullOrWhiteSpace(line)) continue;
+                        
+                        line = line.Trim();
+                        
+                        // 필터링 전 원본 텍스트 저장
+                        result.RawTexts.Add(line);
+                        
+                        if (IsWatermark(line))
+                        {
+                            // 워터마크 텍스트 수집
+                            result.WatermarkTexts.Add(line);
+                        }
+                        else
+                        {
+                            // 콘텐츠 텍스트: 원본 저장 (중국어 정제는 선택적)
+                            result.ContentTexts.Add(line);
+                        }
+                    }
+
+                    ReleaseOcrResult(resultHandle);
+                }
+                catch (Exception ex) 
+                { 
+                    System.Diagnostics.Debug.WriteLine($"분리 추출 오류: {ex.Message}"); 
+                }
+            });
+
+            return result;
+        }
+        
+        /// <summary>
+        /// OCR 분리 결과 (워터마크 vs 콘텐츠)
+        /// </summary>
+        public class OcrSeparatedResult
+        {
+            public List<string> WatermarkTexts { get; } = new();
+            public List<string> ContentTexts { get; } = new();
+            public List<string> RawTexts { get; } = new();  // 필터링 전 원본 텍스트
+            
+            public string WatermarkTextJoined => string.Join(", ", WatermarkTexts);
+            public string ContentTextJoined => string.Join("\n", ContentTexts);
+            public string RawTextJoined => string.Join("\n", RawTexts);
+            
+            public bool HasWatermarks => WatermarkTexts.Count > 0;
+            public bool HasContent => ContentTexts.Count > 0;
+            public bool HasAnyText => RawTexts.Count > 0;
+        }
 
         /// <summary>
         /// 특정 텍스트가 워터마크인지 판별 (bilibili 및 알려진 워터마크 패턴)
+        /// 2026.01 강화: 바코드, ISBN, 가격, 로고 등 보존 콘텐츠 체크 추가
         /// </summary>
         private static bool IsWatermark(string text)
         {
             var textLower = text.ToLower().Trim();
             
-            // bilibili 변종 패턴
-            string[] patterns = { "bilibili", "bilibil", "bilil", "bilib", "bilii", "bilit", "iibili", "ilibili", "ibili", "libil", "mibili", "inibili", "silib", "bili", "biii", "ilibil", "iliu", "ilit" };
-            foreach (var p in patterns) if (textLower.Contains(p)) return true;
+            // ============================================================
+            // [우선] 보존해야 할 콘텐츠 체크 - 이것들은 워터마크가 아님!
+            // ============================================================
+            if (IsPreservedContent(text, textLower))
+                return false;
+            
+            // bilibili 변종 패턴 (영문)
+            string[] biliPatterns = { 
+                "bilibili", "bilibil", "bilil", "bilib", "bilii", "bilit", 
+                "iibili", "ilibili", "ibili", "libil", "mibili", "inibili", 
+                "silib", "bili", "biii", "ilibil", "iliu", "ilit",
+                "oilibili", "oilibil"  // OCR 오인식 패턴 추가
+            };
+            foreach (var p in biliPatterns) if (textLower.Contains(p)) return true;
 
-            // 중국어 특화 워터마크 패턴
-            string[] cPatterns = { "鹭麓咔", "鹭產咔", "鹭薩咔", "鹭蕃咔", "鹭蒂咔", "鹭龍咔", "烤產咔", "烤麗咔", "烤番咔", "烤龍咔", "烤音味", "烤蒂味", "烤莓味", "烤商", "烤止", "烤秘味", "烤成", "灣麓咔", "灣薩咔", "灣麗味", "灣龍味", "鸡鹿咔", "鸡鹿味", "鸡产味", "鸡健味", "鸡i味", "乌鹿카", "凉鹿카", "乌龙味", "福蕾味", "海餐", "海禁", "產V", "產味", "產咔", "薩咔", "麗咔", "蒂味", "龍味", "醬麗咔", "醬番咔", "醬薩", "醬麗味" };
-            foreach (var p in cPatterns) if (text.Contains(p)) return true;
+            // 핵심 중국어 워터마크 패턴 (bilibili鸳鸯咔 변종)
+            string[] primaryPatterns = { 
+                "鸳鸯咔", "鸳鸯味", "鹆鸯咔", "鹛鸯咔", "鸳鸳咔", "鸯鸯咔",  // 鸳鸯 변종
+                "鹭麓咔", "鹭產咔", "鹭薩咔", "鹭蕃咔", "鹭蒂咔", "鹭龍咔", 
+                "烤產咔", "烤麗咔", "烤番咔", "烤龍咔", "烤音味", "烤蒂味", 
+                "烤莓味", "烤商", "烤止", "烤秘味", "烤成", 
+                "灣麓咔", "灣薩咔", "灣麗味", "灣龍味", 
+                "鸡鹿咔", "鸡鹿味", "鸡产味", "鸡健味", "鸡i味", 
+                "乌鹿카", "凉鹿카", "乌龙味", "福蕾味", "海餐", "海禁", 
+                "產V", "產味", "產咔", "薩咔", "麗咔", "蒂味", "龍味", 
+                "醬麗咔", "醬番咔", "醬薩", "醬麗味"
+            };
+            foreach (var p in primaryPatterns) if (text.Contains(p)) return true;
+
+            // 중국어 메타데이터 (페이지 정보) - 档案 관련만
+            string[] cnMetaPatterns = { 
+                "主线档案", "活动档案", "番外档案", "特别档案", "外传档案"
+            };
+            foreach (var p in cnMetaPatterns) if (text.Contains(p)) return true;
 
             // 특정 중국어가 2개 이상 포함된 짧은 텍스트는 워터마크로 의심
             if (text.Length < 15)
             {
-                char[] sChars = { '鹭', '麓', '咔', '烤', '產', '味', '薩', '龍', '蒂' };
+                char[] sChars = { '鹭', '麓', '咔', '烤', '產', '味', '薩', '龍', '蒂', '鸳', '鸯', '鹆' };
                 int matches = 0;
                 foreach (var c in sChars) if (text.Contains(c)) matches++;
                 if (matches >= 2) return true;
             }
+            
+            // 페이지 번호 패턴 (3자리 숫자만, 단 ISBN/바코드 제외)
+            if (text.Length <= 5 && System.Text.RegularExpressions.Regex.IsMatch(text.Trim(), @"^\d{2,3}$"))
+                return true;
+            
+            return false;
+        }
+        
+        /// <summary>
+        /// 보존해야 할 콘텐츠인지 판별 (바코드, ISBN, 가격, 로고, 편집 정보, CHAPTER, 페이지 번호 등)
+        /// 2026.01 수정: 원화집에서 CHAPTER, 페이지 번호는 중요 요소이므로 보존
+        /// </summary>
+        private static bool IsPreservedContent(string text, string textLower)
+        {
+            // 1. ISBN/바코드 패턴 (숫자-하이픈 조합, 10자리 이상)
+            if (System.Text.RegularExpressions.Regex.IsMatch(text, @"^\d[\d\-]{9,}$"))
+                return true;
+            if (textLower.Contains("isbn"))
+                return true;
+                
+            // 2. 가격 정보 (定价, 위안, 元, 원)
+            if (text.Contains("定价") || text.Contains("위안") || text.Contains("元") || 
+                textLower.Contains("price") || System.Text.RegularExpressions.Regex.IsMatch(text, @"\d+\.\d{2}\s*(元|위안)"))
+                return true;
+                
+            // 3. 책임 편집/디자인 정보
+            if (text.Contains("책임") || text.Contains("편집") || text.Contains("디자인") || 
+                text.Contains("责任") || text.Contains("编辑") || text.Contains("设计"))
+                return true;
+                
+            // 4. 게임 로고 (崩壊3rd, 붕괴) - 번역 대상이므로 보존
+            if (text.Contains("崩壊") || text.Contains("崩坏") || text.Contains("붕괴"))
+                return true;
+            // "HONKAI IMPACT" 전체 문구 (로고)는 보존
+            if (textLower.Contains("honkai impact") || textLower.Contains("honkai_impact"))
+                return true;
+            
+            // 5. **원화집 중요 요소: CHAPTER, 페이지 번호**
+            // CHAPTER 패턴 (원화집에서 중요한 첫터 마커)
+            if (textLower.StartsWith("chapter") || textLower == "chapter")
+                return true;
+            // 페이지 번호 (2-3자리 숫자) - 원화집에서 중요
+            if (text.Length <= 5 && System.Text.RegularExpressions.Regex.IsMatch(text.Trim(), @"^\d{1,4}$"))
+                return true;
+                
+            // 6. 특수문자/이모티콘이 주로 구성된 텍스트 (2글자 이하이면서 특수문자 포함)
+            if (text.Length <= 3)
+            {
+                int specialCount = 0;
+                foreach (char c in text)
+                {
+                    if (!char.IsLetterOrDigit(c) && !char.IsWhiteSpace(c))
+                        specialCount++;
+                }
+                if (specialCount >= text.Length / 2)
+                    return true;
+            }
+            
             return false;
         }
 
         /// <summary>
         /// 중국어 유니코드 범위에 해당하는 문자만 추출 (한/일/영 제외)
+        /// 2026.01 완화: 더 많은 텍스트 탐지를 위해 범위 확장
         /// </summary>
         private static string ExtractChineseOnly(string text)
         {
             var result = new StringBuilder();
             foreach (char c in text)
             {
-                // CJK 통합 한자 / 확장 A / 호환 한자 범위
-                if ((c >= '\u4E00' && c <= '\u9FFF') || (c >= '\u3400' && c <= '\u4DBF') || (c >= '\uF900' && c <= '\uFAFF'))
+                // CJK 통합 한자 / 확장 A / 호환 한자 / 구두점 범위
+                if ((c >= '\u4E00' && c <= '\u9FFF') ||      // CJK 통합 한자
+                    (c >= '\u3400' && c <= '\u4DBF') ||      // CJK 확장 A
+                    (c >= '\uF900' && c <= '\uFAFF') ||      // CJK 호환 한자
+                    (c >= '\u3000' && c <= '\u303F') ||      // CJK 기호 및 구두점
+                    (c >= '\uFF00' && c <= '\uFFEF'))        // 전각 문자
                     result.Append(c);
             }
-            var s = result.ToString();
-            return s.Length >= 2 ? s : ""; // 2글자 미만은 무시
+            var s = result.ToString().Trim();
+            return s.Length >= 1 ? s : "";  // 1글자 이상이면 반환 (2→1 완화)
         }
 
         #region Cache Logic

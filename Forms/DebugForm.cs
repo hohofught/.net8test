@@ -37,10 +37,16 @@ namespace GeminiWebTranslator.Forms
             {
                 Dock = DockStyle.Fill,
                 Orientation = Orientation.Horizontal,
-                SplitterDistance = 250,
-                BackColor = UiTheme.ColorBackground,
-                Panel1MinSize = 180,
-                Panel2MinSize = 150
+                BackColor = UiTheme.ColorBackground
+            };
+            
+            // Panel MinSize와 SplitterDistance를 폼 로드 후 안전하게 설정
+            this.Load += (s, e) => {
+                try {
+                    splitContainer.Panel1MinSize = 180;
+                    splitContainer.Panel2MinSize = 150;
+                    splitContainer.SplitterDistance = Math.Max(180, Math.Min(250, splitContainer.Height - 150));
+                } catch { }
             };
 
             // === 상단: 버튼 패널 ===
@@ -67,6 +73,43 @@ namespace GeminiWebTranslator.Forms
             btnOpenWebView.Click += (s, e) =>
             {
                 _mainForm.ShowBrowserWindow();
+            };
+
+            // WebView 로그인 모드 창 열기 (SharedWebViewManager 사용)
+            var btnWebViewLogin = CreateDebugButton("🔐 WebView 로그인 창 열기", UiTheme.ColorSuccess);
+            btnWebViewLogin.Click += async (s, e) =>
+            {
+                btnWebViewLogin.Enabled = false;
+                AppendLocalLog("[Debug] WebView 로그인 창 열기 시도...");
+                try
+                {
+                    var manager = SharedWebViewManager.Instance;
+                    manager.OnLog += msg => AppendLocalLog(msg);
+                    
+                    // 로그인 모드로 설정하고 창 표시
+                    manager.UseLoginMode = true;
+                    
+                    if (await manager.InitializeAsync(showWindow: true))
+                    {
+                        // 디버그 모드에서는 자동 닫기 비활성화
+                        manager.ShowBrowserWindow(autoCloseOnLogin: false);
+                        AppendLocalLog("[Debug] [성공] WebView 로그인 창 열림 (자동 닫기 비활성화)");
+                    }
+                    else
+                    {
+                        AppendLocalLog("[Debug] [실패] WebView 초기화 실패");
+                        MessageBox.Show("WebView 초기화에 실패했습니다.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AppendLocalLog($"[Debug] [실패] 오류: {ex.Message}");
+                    MessageBox.Show($"WebView 로그인 창 열기 실패:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    btnWebViewLogin.Enabled = true;
+                }
             };
 
             // 브라우저 캐시 초기화
@@ -165,7 +208,7 @@ namespace GeminiWebTranslator.Forms
             };
 
             buttonPanel.Controls.AddRange(new Control[] { 
-                lblTitle, btnOpenWebView, btnRestartWebView, btnNewChat, btnClearCache, 
+                lblTitle, btnOpenWebView, btnWebViewLogin, btnRestartWebView, btnNewChat, btnClearCache, 
                 btnForceRestartBrowser, btnOpenLogs, btnClearLog 
             });
             splitContainer.Panel1.Controls.Add(buttonPanel);

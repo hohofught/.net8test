@@ -6,7 +6,6 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using PuppeteerSharp;
 using Point = System.Drawing.Point;
 using GeminiWebTranslator.Services;
 
@@ -248,7 +247,7 @@ namespace GeminiWebTranslator.Forms
             try
             {
                 Log("[HTTP] 독립 브라우저 실행 시도");
-                // PuppeteerSharp을 사용하여 실제 브라우저를 띄우고 쿠키 낚아채기
+                // SharedWebViewManager를 사용하여 WebView2 브라우저를 띄우고 쿠키 추출
                 var (psid, psidts, userAgent) = await ExtractCookiesFromIsolatedBrowserAsync();
                 
                 if (!string.IsNullOrEmpty(psid))
@@ -286,22 +285,28 @@ namespace GeminiWebTranslator.Forms
         {
             if (btnResetBrowser == null || lblStatus == null) return;
             
-            if (MessageBox.Show("브라우저 실행 파일을 삭제하고 다시 다운로드하시겠습니까?\n이 작업은 시간이 다소 걸릴 수 있습니다.", "브라우저 초기화", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            if (MessageBox.Show("WebView2 세션을 초기화하시겠습니까?\n로그인 상태가 초기화됩니다.", "세션 초기화", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
 
             btnResetBrowser.Enabled = false;
             btnAutoExtract!.Enabled = false;
-            lblStatus.Text = "브라우저 초기화 중...";
+            lblStatus.Text = "WebView2 세션 초기화 중...";
             
             try
             {
-                var manager = new Services.IsolatedBrowserManager();
-                manager.OnStatusUpdate += msg => {
-                    lblStatus.Invoke(() => lblStatus.Text = msg);
-                    Log(msg);
-                };
-                await manager.ResetBrowserAsync();
-                lblStatus.Text = "[성공] 초기화 및 재설치 완료!";
-                lblStatus.ForeColor = Color.Lime;
+                // gemini_session 폴더 삭제
+                var sessionPath = Path.Combine(_profileDir, "gemini_session");
+                if (Directory.Exists(sessionPath))
+                {
+                    Directory.Delete(sessionPath, true);
+                    lblStatus.Text = "[성공] 세션 초기화 완료!";
+                    lblStatus.ForeColor = Color.Lime;
+                    Log("[HTTP] WebView2 세션 초기화 완료");
+                }
+                else
+                {
+                    lblStatus.Text = "[알림] 초기화할 세션이 없습니다.";
+                    lblStatus.ForeColor = Color.Yellow;
+                }
             }
             catch (Exception ex)
             {
@@ -313,63 +318,90 @@ namespace GeminiWebTranslator.Forms
                 btnResetBrowser.Enabled = true;
                 btnAutoExtract.Enabled = true;
             }
+
+            await Task.CompletedTask;
         }
         
         /// <summary>
-        /// IsolatedBrowserManager를 사용하여 Chrome for Testing을 실행하고 쿠키를 추출합니다.
+        /// SharedWebViewManager를 사용하여 WebView2를 실행하고 쿠키를 추출합니다.
         /// </summary>
         private async Task<(string? psid, string? psidts, string? userAgent)> ExtractCookiesFromIsolatedBrowserAsync()
         {
-            var manager = new Services.IsolatedBrowserManager();
-            IBrowser? browser = null;
-            
             try
             {
-                // 상태 업데이트를 UI에 반영
-                manager.OnStatusUpdate += msg =>
+                // SharedWebViewManager 싱글톤 사용
+                var manager = SharedWebViewManager.Instance;
+                manager.OnLog += msg => Log(msg);
+                
+                lblStatus?.Invoke(() => lblStatus.Text = "WebView2 초기화 중...");
+                
+                // WebView2 초기화 (창 표시)
+                if (!await manager.InitializeAsync(showWindow: true))
                 {
-                    lblStatus?.Invoke(() => lblStatus.Text = msg);
-                    Log(msg);
-                };
-                
-                // Chrome for Testing 실행 (필요시 자동 다운로드)
-                browser = await manager.LaunchBrowserAsync(headless: false);
-                
-                var pages = await browser.PagesAsync();
-                var page = pages.FirstOrDefault() ?? await browser.NewPageAsync();
-                
-                // 페이지가 Gemini가 아닌 경우 이동
-                var currentUrl = page.Url;
-                if (!currentUrl.Contains("gemini.google.com"))
-                {
-                    await page.GoToAsync("https://gemini.google.com", WaitUntilNavigation.Networkidle2);
+                    return (null, null, null);
                 }
+                
+                lblStatus?.Invoke(() => lblStatus.Text = "Gemini에 로그인해 주세요... (최대 3분 대기)");
                 
                 // 사용자가 로그인할 시간을 주기 위해 쿠키가 나타날 때까지 반복 감시 (최대 3분)
                 string? psid = null;
                 string? psidts = null;
+                
                 for (int i = 0; i < 180; i++)
                 {
-                    var cookies = await page.GetCookiesAsync("https://gemini.google.com");
-                    psid = cookies.FirstOrDefault(c => c.Name == "__Secure-1PSID")?.Value;
-                    psidts = cookies.FirstOrDefault(c => c.Name == "__Secure-1PSIDTS")?.Value;
+                    try
+                    {
+                        var loginStatus = await manager.CheckLoginStatusAsync();
+                        if (loginStatus)
+                        {
+                            // 쿠키 추출을 위한 스크립트 실행
+                            var cookieScript = @"
+                            (function() {
+                                var cookies = document.cookie.split(';');
+                                var result = {};
+                                for (var i = 0; i < cookies.length; i++) {
+                                    var cookie = cookies[i].trim();
+                                    var parts = cookie.split('=');
+                                    if (parts.length >= 2) {
+                                        result[parts[0]] = parts.slice(1).join('=');
+                                    }
+                                }
+                                return JSON.stringify(result);
+                            })()";
+                            
+                            var cookieJson = await manager.ExecuteScriptAsync(cookieScript);
+                            if (!string.IsNullOrEmpty(cookieJson) && cookieJson != "null")
+                            {
+                                var cookies = Newtonsoft.Json.Linq.JObject.Parse(cookieJson.Trim('"').Replace("\\\"", "\""));
+                                psid = cookies["__Secure-1PSID"]?.ToString();
+                                psidts = cookies["__Secure-1PSIDTS"]?.ToString();
+                                
+                                if (!string.IsNullOrEmpty(psid))
+                                {
+                                    Log($"[HTTP] 쿠키 추출 성공: PSID 발견");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    catch { }
                     
-                    if (!string.IsNullOrEmpty(psid)) break;
                     await Task.Delay(1000);
-                    
-                    if (browser.IsClosed) break;
                 }
                 
-                // User-Agent 일관성을 위해 브라우저 엔진의 UA 정보 추출
-                var userAgent = await page.EvaluateExpressionAsync<string>("navigator.userAgent");
+                // User-Agent 추출
+                var userAgent = await manager.ExecuteScriptAsync("navigator.userAgent");
+                userAgent = userAgent?.Trim('"');
+                
+                // WebView 창 숨기기
+                manager.HideBrowserWindow();
+                
                 return (psid, psidts, userAgent);
             }
-            finally
+            catch (Exception ex)
             {
-                if (browser != null && !browser.IsClosed)
-                {
-                    await manager.CloseBrowserAsync(); // IsolatedBrowserManager 통해 종료
-                }
+                Log($"[HTTP] 쿠키 추출 오류: {ex.Message}");
+                return (null, null, null);
             }
         }
         

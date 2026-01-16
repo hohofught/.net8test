@@ -367,6 +367,341 @@ namespace GeminiWebTranslator.Automation
             })()
         ";
 
+        /// <summary>
+        /// 비로그인 모드 사용 제한 팝업 감지 (signed-out-dialog)
+        /// Express 모드에서 일정 횟수 이상 사용 시 나타나는 강제 로그인 팝업 감지
+        /// </summary>
+        public const string DetectSignedOutDialogScript = @"
+            (function() {
+                // 1. signed-out-dialog 컴포넌트 직접 확인
+                const signedOutDialog = document.querySelector('signed-out-dialog');
+                
+                // 2. Material Dialog 컨테이너 확인
+                const matDialog = document.querySelector('mat-dialog-container, .mat-mdc-dialog-container');
+                
+                const dialog = signedOutDialog || matDialog;
+                if (!dialog) {
+                    return JSON.stringify({ detected: false, reason: 'no_dialog' });
+                }
+                
+                // 3. 다이얼로그 제목 확인
+                const title = dialog.querySelector('h1, h2, .mat-mdc-dialog-title, [mat-dialog-title]');
+                const titleText = title ? title.innerText.trim() : '';
+                
+                // 4. 본문 내용 확인
+                const content = dialog.querySelector('mat-dialog-content, .mat-mdc-dialog-content, [mat-dialog-content]');
+                const contentText = content ? content.innerText.trim() : '';
+                
+                // 5. 로그아웃/세션 만료 관련 키워드 매칭
+                const logoutKeywords = ['로그아웃', '로그인', 'signed out', 'sign in', 'session expired', '세션'];
+                const isSignedOutDialog = logoutKeywords.some(kw => 
+                    titleText.toLowerCase().includes(kw.toLowerCase()) || 
+                    contentText.toLowerCase().includes(kw.toLowerCase())
+                );
+                
+                // 6. 로그인 버튼 존재 확인
+                const loginBtn = dialog.querySelector('button.mat-primary, button[color=""primary""], mat-dialog-actions button');
+                
+                return JSON.stringify({
+                    detected: isSignedOutDialog,
+                    title: titleText.substring(0, 100),
+                    content: contentText.substring(0, 200),
+                    hasLoginButton: !!loginBtn,
+                    dialogType: signedOutDialog ? 'signed-out-dialog' : 'mat-dialog'
+                });
+            })()
+        ";
+
+        /// <summary>
+        /// 비로그인 팝업 처리 스크립트
+        /// action: 'login' - 로그인 버튼 클릭하여 Google 로그인 페이지로 이동
+        /// action: 'dismiss' - 팝업을 DOM에서 강제 제거 (임시 방편)
+        /// action: 'new_session' - 팝업 닫고 새 채팅 세션 시작
+        /// </summary>
+        public const string HandleSignedOutDialogScript = @"
+            (function(action) {
+                const dialog = document.querySelector('signed-out-dialog') ||
+                               document.querySelector('mat-dialog-container, .mat-mdc-dialog-container');
+                               
+                if (!dialog) {
+                    return JSON.stringify({ success: false, result: 'no_dialog_found' });
+                }
+                
+                // 오버레이 제거 함수
+                const removeOverlay = () => {
+                    const overlays = document.querySelectorAll('.cdk-overlay-container, .cdk-overlay-backdrop');
+                    overlays.forEach(el => el.remove());
+                };
+                
+                if (action === 'login') {
+                    // 로그인 버튼 클릭하여 Google 로그인으로 이동
+                    const loginBtn = dialog.querySelector('button.mat-primary, button[color=""primary""], mat-dialog-actions button');
+                    if (loginBtn) {
+                        loginBtn.click();
+                        return JSON.stringify({ success: true, result: 'clicked_login_button' });
+                    }
+                    return JSON.stringify({ success: false, result: 'login_button_not_found' });
+                }
+                
+                if (action === 'dismiss') {
+                    // DOM에서 강제 제거 (응답 복구는 불가)
+                    removeOverlay();
+                    dialog.remove();
+                    return JSON.stringify({ success: true, result: 'dialog_dismissed' });
+                }
+                
+                if (action === 'new_session') {
+                    // 팝업 닫고 새 채팅 시작
+                    removeOverlay();
+                    dialog.remove();
+                    
+                    // 새 채팅 버튼 클릭 시도
+                    setTimeout(() => {
+                        const newChatBtn = document.querySelector('button[aria-label*=""새 채팅""], button[aria-label*=""New chat""]') ||
+                                          document.querySelector('a[href=""/app""]');
+                        if (newChatBtn) newChatBtn.click();
+                        else window.location.href = 'https://gemini.google.com/app';
+                    }, 500);
+                    
+                    return JSON.stringify({ success: true, result: 'starting_new_session' });
+                }
+                
+                return JSON.stringify({ success: false, result: 'unknown_action' });
+            })
+        ";
+
+        /// <summary>
+        /// 비로그인 모드 세션 복구 스크립트
+        /// 팝업 발생 후 페이지를 정상 상태로 복구하는 종합 스크립트
+        /// </summary>
+        public const string RecoverFromSignedOutScript = @"
+            (async function() {
+                const result = {
+                    success: false,
+                    action: 'none',
+                    message: ''
+                };
+                
+                try {
+                    // 1. 모든 오버레이 및 다이얼로그 제거
+                    const overlays = document.querySelectorAll('.cdk-overlay-container, .cdk-overlay-backdrop, mat-dialog-container, signed-out-dialog');
+                    overlays.forEach(el => el.remove());
+                    
+                    // 2. body 스크롤 복구 (모달이 body 스크롤을 막는 경우)
+                    document.body.style.overflow = '';
+                    document.body.classList.remove('cdk-global-scrollblock');
+                    
+                    // 3. 입력창 상태 확인
+                    const input = document.querySelector('.ql-editor, div[contenteditable=""true""]');
+                    if (!input) {
+                        // 입력창이 없으면 페이지 새로고침 필요
+                        result.action = 'needs_reload';
+                        result.message = '입력창을 찾을 수 없습니다. 페이지 새로고침이 필요합니다.';
+                        return JSON.stringify(result);
+                    }
+                    
+                    // 4. 입력창 활성화
+                    input.focus();
+                    input.setAttribute('contenteditable', 'true');
+                    
+                    // 5. 새 채팅으로 이동 (현재 채팅은 사용 불가할 수 있음)
+                    const newChatBtn = document.querySelector('button[aria-label*=""새 채팅""], button[aria-label*=""New chat""]');
+                    if (newChatBtn && newChatBtn.offsetParent !== null) {
+                        newChatBtn.click();
+                        result.action = 'new_chat_started';
+                        result.message = '새 채팅을 시작합니다.';
+                    } else {
+                        // 새 채팅 버튼이 없으면 URL로 이동
+                        window.location.href = 'https://gemini.google.com/app';
+                        result.action = 'navigated_to_new_chat';
+                        result.message = '새 채팅 페이지로 이동합니다.';
+                    }
+                    
+                    result.success = true;
+                } catch (e) {
+                    result.action = 'error';
+                    result.message = e.message;
+                }
+                
+                return JSON.stringify(result);
+            })()
+        ";
+
+        /// <summary>
+        /// 로그인 권장 배너 감지 (sign-in-nudge)
+        /// 비로그인 상태에서 이미지 생성 등 특정 기능 사용 시 나타나는 하단 배너
+        /// 강제 팝업과 달리 닫기 버튼이 없으며, 지속적으로 노출됨
+        /// </summary>
+        public const string DetectLoginNudgeBannerScript = @"
+            (function() {
+                // 1. sign-in-nudge 컴포넌트 직접 확인
+                const nudgeBanner = document.querySelector('sign-in-nudge');
+                
+                // 2. 텍스트로 배너 검색 (fallback)
+                let textBanner = null;
+                if (!nudgeBanner) {
+                    const allElements = document.querySelectorAll('.nudge-text, [class*=""nudge""]');
+                    for (const el of allElements) {
+                        const text = el.innerText || '';
+                        if (text.includes('로그인하면') || text.includes('Sign in to')) {
+                            textBanner = el.closest('sign-in-nudge') || el.parentElement?.parentElement;
+                            break;
+                        }
+                    }
+                }
+                
+                const banner = nudgeBanner || textBanner;
+                if (!banner) {
+                    return JSON.stringify({ detected: false, reason: 'no_banner' });
+                }
+                
+                // 3. 배너 내용 확인
+                const textEl = banner.querySelector('.nudge-text') || banner;
+                const bannerText = textEl.innerText || '';
+                
+                // 4. 로그인 버튼 확인
+                const loginBtn = banner.querySelector('.sign-in-button, button.mdc-button, button[class*=""sign""]');
+                
+                return JSON.stringify({
+                    detected: true,
+                    bannerType: 'sign-in-nudge',
+                    text: bannerText.substring(0, 200),
+                    hasLoginButton: !!loginBtn,
+                    isVisible: banner.offsetParent !== null
+                });
+            })()
+        ";
+
+        /// <summary>
+        /// 로그인 권장 배너 처리 스크립트
+        /// action: 'login' - 로그인 버튼 클릭
+        /// action: 'dismiss' - 배너를 DOM에서 제거 (닫기 버튼이 없음)
+        /// action: 'hide' - 배너를 숨김 처리만 (display: none)
+        /// </summary>
+        public const string HandleLoginNudgeBannerScript = @"
+            (function(action) {
+                const banner = document.querySelector('sign-in-nudge');
+                
+                if (!banner) {
+                    return JSON.stringify({ success: false, result: 'no_banner_found' });
+                }
+                
+                if (action === 'login') {
+                    // 로그인 버튼 클릭
+                    const loginBtn = banner.querySelector('.sign-in-button, button.mdc-button, button[class*=""sign""]');
+                    if (loginBtn) {
+                        loginBtn.click();
+                        return JSON.stringify({ success: true, result: 'clicked_login_button' });
+                    }
+                    return JSON.stringify({ success: false, result: 'login_button_not_found' });
+                }
+                
+                if (action === 'dismiss') {
+                    // DOM에서 완전 제거 (닫기 버튼이 없으므로 강제 제거)
+                    banner.remove();
+                    return JSON.stringify({ success: true, result: 'banner_removed' });
+                }
+                
+                if (action === 'hide') {
+                    // 숨김 처리만 (나중에 다시 나타날 수 있음)
+                    banner.style.display = 'none';
+                    return JSON.stringify({ success: true, result: 'banner_hidden' });
+                }
+                
+                return JSON.stringify({ success: false, result: 'unknown_action' });
+            })
+        ";
+
+        /// <summary>
+        /// 모든 로그인 관련 UI 요소 감지 (팝업 + 배너 통합)
+        /// 비로그인 모드에서 발생할 수 있는 모든 로그인 유도 요소를 한번에 감지
+        /// </summary>
+        public const string DetectAllLoginPromptsScript = @"
+            (function() {
+                const result = {
+                    hasAnyPrompt: false,
+                    signedOutDialog: false,
+                    loginNudgeBanner: false,
+                    loginButton: false,
+                    details: {}
+                };
+                
+                // 1. 강제 팝업 (signed-out-dialog) 확인
+                const dialog = document.querySelector('signed-out-dialog') ||
+                               document.querySelector('mat-dialog-container');
+                if (dialog) {
+                    const title = dialog.querySelector('h1, .mat-mdc-dialog-title');
+                    const titleText = title ? title.innerText.trim() : '';
+                    const logoutKeywords = ['로그아웃', '로그인', 'signed out', 'sign in'];
+                    if (logoutKeywords.some(kw => titleText.toLowerCase().includes(kw.toLowerCase()))) {
+                        result.signedOutDialog = true;
+                        result.hasAnyPrompt = true;
+                        result.details.dialogTitle = titleText;
+                    }
+                }
+                
+                // 2. 로그인 권장 배너 (sign-in-nudge) 확인
+                const nudge = document.querySelector('sign-in-nudge');
+                if (nudge && nudge.offsetParent !== null) {
+                    result.loginNudgeBanner = true;
+                    result.hasAnyPrompt = true;
+                    const text = nudge.querySelector('.nudge-text');
+                    result.details.bannerText = text ? text.innerText.substring(0, 100) : '';
+                }
+                
+                // 3. 상단 로그인 버튼 확인 (일반적인 로그아웃 상태)
+                const loginBtn = document.querySelector('button[aria-label*=""로그인""], button[aria-label*=""Sign in""]');
+                if (loginBtn && loginBtn.offsetParent !== null) {
+                    result.loginButton = true;
+                    // 로그인 버튼만 있는 경우는 hasAnyPrompt를 true로 설정하지 않음 (정상 상태)
+                }
+                
+                return JSON.stringify(result);
+            })()
+        ";
+
+        /// <summary>
+        /// 모든 로그인 관련 UI 요소 일괄 처리
+        /// 팝업과 배너를 모두 제거하여 작업을 계속할 수 있도록 함
+        /// </summary>
+        public const string DismissAllLoginPromptsScript = @"
+            (function() {
+                const result = {
+                    dialogDismissed: false,
+                    bannerDismissed: false,
+                    overlayRemoved: false
+                };
+                
+                // 1. 강제 팝업 제거
+                const dialog = document.querySelector('signed-out-dialog') ||
+                               document.querySelector('mat-dialog-container');
+                if (dialog) {
+                    dialog.remove();
+                    result.dialogDismissed = true;
+                }
+                
+                // 2. 오버레이 제거
+                const overlays = document.querySelectorAll('.cdk-overlay-container, .cdk-overlay-backdrop');
+                if (overlays.length > 0) {
+                    overlays.forEach(el => el.remove());
+                    result.overlayRemoved = true;
+                }
+                
+                // 3. body 스크롤 복구
+                document.body.style.overflow = '';
+                document.body.classList.remove('cdk-global-scrollblock');
+                
+                // 4. 로그인 배너 제거
+                const nudge = document.querySelector('sign-in-nudge');
+                if (nudge) {
+                    nudge.remove();
+                    result.bannerDismissed = true;
+                }
+                
+                return JSON.stringify(result);
+            })()
+        ";
+
         #endregion
 
         #region 이미지 기능 진단

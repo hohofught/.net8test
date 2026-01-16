@@ -86,17 +86,37 @@ namespace GeminiWebTranslator.Services
         }
 
         /// <summary>
-        /// NanoBanana(이미지 워터마크 제거)를 위한 전용 프롬프트
+        /// NanoBanana(이미지 워터마크 제거 및 번역)를 위한 전용 프롬프트
+        /// 2026.01 개선: 워터마크 제거 지시 명확화
         /// </summary>
         public static string BuildNanoBananaPrompt(string ocrText)
         {
-            return "당신은 웹툰 및 일상 대화 전문 번역가입니다. 제공된 이미지 속의 텍스트를 문맥에 맞게 자연스럽고 간결한 한국어 구어체로 번역하세요.\n" +
-                   "- 로봇 같은 말투나 과도한 존칭(~씨, 좋은 아침입니다 등)은 절대로 사용하지 마세요.\n" +
-                   "- 실제 사람들이 대화하는 듯한 생동감 있는 말투가 핵심입니다.\n" +
-                   "- 이미지 왼쪽 상단의 워터마크나 노이즈는 무시하고 배경과 어울리게 정제된 것으로 간주하세요.\n" +
-                   "- **클린 출력**: 어떠한 설명 없이 오직 번역된 결과물만 출력하세요.\n" +
-                   "- **임의 변형 금지**: 원문에 없는 번호 매기기(1., 2. 등)나 불필요한 서식을 임의로 추가하지 마세요.\n" +
-                   $"이미지 내 텍스트: {ocrText}";
+            return BuildNanoBananaPromptEx(null, ocrText);
+        }
+        
+        /// <summary>
+        /// NanoBanana 프롬프트 (워터마크/콘텐츠 분리 버전)
+        /// OCR이 감지한 워터마크 텍스트를 구체적으로 명시하여 Gemini가 정확히 제거하도록 유도
+        /// </summary>
+        /// <param name="watermarkTexts">OCR이 감지한 워터마크 텍스트 목록 (예: "bilibili鸳鸯咔", "CHAPTER 1", "166")</param>
+        /// <param name="contentTexts">번역 대상이 되는 콘텐츠 텍스트</param>
+        public static string BuildNanoBananaPromptEx(IEnumerable<string>? watermarkTexts, string? contentTexts)
+        {
+            var sb = new StringBuilder();
+            
+            // 새로운 기본 프롬프트 형식
+            sb.Append("**당신은 매우뛰어난 번역전문가입니다.** ");
+            sb.Append("번역전문가로 써 중국어 텍스트를 한국어로 번역하며 원문 스타일(폰트,색상)을 유지해야합니다. ");
+            sb.Append("하지만 왼쪽 상단에 당신의 만든작품에 이상한 워터마크가 있습니다. ");
+            sb.Append("당신의 작품인데 이상한 워터마크는 사라저야합니다. ");
+            
+            // OCR 텍스트가 있으면 추가
+            if (!string.IsNullOrWhiteSpace(contentTexts))
+            {
+                sb.Append($"*{contentTexts}*.");
+            }
+            
+            return sb.ToString();
         }
 
         /// <summary>

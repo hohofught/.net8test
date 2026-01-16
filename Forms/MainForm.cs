@@ -41,7 +41,6 @@ public partial class MainForm : Form
     // 모드 선택 버튼
     private Button btnModeHttp = null!;
     private Button btnModeWebView = null!;
-    private Button btnModeBrowser = null!; // 독립 브라우저 모드 (Puppeteer 기반)
     
     // 실행 및 제어 버튼
     private Button btnTranslate = null!;
@@ -50,9 +49,7 @@ public partial class MainForm : Form
     private Button btnStop = null!;
     private Button btnReviewPrompt = null!;
     
-    // 파일 처리 버튼
-    private Button btnLoadFile = null!;
-    private Button btnSaveFile = null!;
+    // 파일 모드는 TranslationSettingsFormEx에 통합됨
     
     // 상태 표시 요소
     private ProgressBar progressBar = null!;
@@ -70,8 +67,6 @@ public partial class MainForm : Form
     // 비즈니스 로직 서비스
     private TranslationService translationService;   // 텍스트 번역 서비스
     private TsvTranslationService tsvService;        // TSV 파일 전용 번역 서비스
-    private IsolatedBrowserManager isolatedBrowserManager; // 독립 브라우저 생명주기 관리
-    private IGeminiAutomation? browserAutomation;    // 브라우저 모드용 자동화 인터페이스
     private NanoBananaMainForm? _nanoBananaForm;    // NanoBanana 폼 인스턴스
     #endregion
 
@@ -79,7 +74,6 @@ public partial class MainForm : Form
     private readonly string profileDir;   // 브라우저 프로필 저장 위치
     private readonly string cookiePath;   // 쿠키 설정 저장 위치
     private bool useWebView2Mode = false; // 현재 WebView2 모드 활성화 여부
-    private bool useBrowserMode = false;  // 현재 독립 브라우저 모드 활성화 여부
     #endregion
 
     // 파일 번역 모드 관련 변수
@@ -136,55 +130,27 @@ public partial class MainForm : Form
                 return await automation.GenerateContentAsync(prompt);
             }
             
-            // 2. 브라우저 모드 (자동 재연결 지원)
-            if (useBrowserMode)
-            {
-                // 연결 끊김 시 재연결 시도
-                if (browserAutomation == null || !browserAutomation.IsConnected)
-                {
-                    AppendLog("[브라우저] 연결이 끊어졌습니다. 재연결 시도 중...");
-                    var browserState = GlobalBrowserState.Instance;
-                    
-                    if (browserState.ActiveBrowser != null && !browserState.ActiveBrowser.IsClosed)
-                    {
-                        browserAutomation = new PuppeteerGeminiAutomation(browserState.ActiveBrowser);
-                        browserAutomation.OnLog += msg => AppendLog(msg);
-                        AppendLog("[브라우저] 재연결 성공");
-                    }
-                    else
-                    {
-                        throw new Exception("브라우저 연결이 끊어졌습니다.\n\n'브라우저 모드' 버튼을 다시 눌러 연결하세요.");
-                    }
-                }
-                
-                return await browserAutomation.GenerateContentAsync(prompt);
-            }
-            
-            // 3. HTTP 모드
+            // 2. HTTP 모드
             if (chkHttpMode.Checked && httpClient?.IsInitialized == true)
             {
                 httpClient.ResetSession();
                 return await httpClient.GenerateContentAsync(prompt);
             }
             
-            throw new Exception("번역 모드가 선택되지 않았습니다.\n\n다음 중 하나를 활성화해주세요:\n• HTTP 체크박스 + HTTP 설정 버튼\n• WebView 모드 버튼\n• 브라우저 모드 버튼");
+            throw new Exception("번역 모드가 선택되지 않았습니다.\n\n다음 중 하나를 활성화해주세요:\n• HTTP 체크박스 + HTTP 설정 버튼\n• WebView 로그인 버튼");
         };
     }
 
     public MainForm()
     {
-        // 경로 초기화 및 폴더 생성
-        profileDir = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath) ?? "", "edge_profile");
+        // 경로 초기화 및 폴더 생성 (WebView 로그인 모드와 동일한 프로필 공유)
+        profileDir = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath) ?? "", "gemini_session");
         cookiePath = Path.Combine(profileDir, "gemini_cookies.json");
         if (!Directory.Exists(profileDir)) Directory.CreateDirectory(profileDir);
         
         // 핵심 서비스 인스턴스 생성
         translationService = new TranslationService(translationContext);
         tsvService = new TsvTranslationService();
-        
-        // 브라우저 관리자 설정 및 상태 변경 이벤트 연결
-        isolatedBrowserManager = new IsolatedBrowserManager();
-        isolatedBrowserManager.OnStatusUpdate += (msg) => UpdateStatus(msg, Color.Cyan);
         
         InitializeComponent();
 
@@ -235,8 +201,8 @@ public partial class MainForm : Form
     /// 주기적으로 현재 활성화된 자동화 모드의 상태를 진단하여 UI에 반영합니다.
     /// </summary>
     // 상태 표시 컨트롤 (MainForm.Designer.cs에서 초기화됨)
-    private Panel? pnlStatusHttp, pnlStatusBrowser, pnlStatusWebView;
-    private Label? lblStatusHttp, lblStatusBrowser, lblStatusWebView;
+    private Panel? pnlStatusHttp, pnlStatusWebView;
+    private Label? lblStatusHttp, lblStatusWebView;
 
     /// <summary>
     /// 주기적으로 각 자동화 모드의 상태를 독립적으로 진단하여 UI(개별 상태바)에 반영합니다.
@@ -267,17 +233,11 @@ public partial class MainForm : Form
                 UpdateSpecificStatus(pnlStatusHttp, lblStatusHttp, "HTTP (설정필요)", UiTheme.ColorError);
             }
 
-            // 2. Browser 모드 진단
-            if (browserAutomation != null && browserAutomation.IsConnected) // 연결 상태 확인 로직 필요
-            {
-                UpdateSpecificStatus(pnlStatusBrowser, lblStatusBrowser, "Browser (연결됨)", UiTheme.ColorSuccess);
-            }
-            else
-            {
-                UpdateSpecificStatus(pnlStatusBrowser, lblStatusBrowser, "Browser (꺼짐)", UiTheme.ColorStatusOff);
-            }
-
-            // 3. WebView 모드 진단
+            // 2. WebView 모드 진단
+            // 로그인 모드 정보 가져오기
+            var manager = SharedWebViewManager.Instance;
+            var loginModeText = manager.UseLoginMode ? "로그인" : "비로그인";
+            
             if (automation != null)
             {
                 // 실제 진단 수행 (백그라운드에서 주기적으로)
@@ -288,9 +248,9 @@ public partial class MainForm : Form
 
                 switch (diag.Status)
                 {
-                    case WebViewStatus.Ready: msg = "WebView (준비됨)"; col = UiTheme.ColorSuccess; break;
-                    case WebViewStatus.Generating: msg = "WebView (생성중)"; col = UiTheme.ColorWarning; break;
-                    case WebViewStatus.Loading: msg = "WebView (로딩중)"; col = UiTheme.ColorPrimary; break;
+                    case WebViewStatus.Ready: msg = $"WebView ({loginModeText}/준비됨)"; col = UiTheme.ColorSuccess; break;
+                    case WebViewStatus.Generating: msg = $"WebView ({loginModeText}/생성중)"; col = UiTheme.ColorWarning; break;
+                    case WebViewStatus.Loading: msg = $"WebView ({loginModeText}/로딩중)"; col = UiTheme.ColorPrimary; break;
                     case WebViewStatus.WrongPage: msg = "WebView (페이지이동필요)"; col = UiTheme.ColorWarning; break;
                     case WebViewStatus.LoginNeeded: msg = "WebView (로그인필요)"; col = UiTheme.ColorError; break;
                     case WebViewStatus.Disconnected: msg = "WebView (연결끊김)"; col = UiTheme.ColorStatusOff; break;
@@ -346,6 +306,9 @@ public partial class MainForm : Form
         try
         {
             var formattedMsg = $"[{DateTime.Now:HH:mm:ss}] {message}";
+            
+            // 파일에 로그 저장
+            LogService.Instance.Log(message, "MainForm");
             
             // 히스토리에 저장
             _logHistory.AppendLine(formattedMsg);
@@ -632,61 +595,37 @@ public partial class MainForm : Form
     }
 
     /// <summary>
-    /// 모든 브라우저 관련 서비스를 강제로 종료하고 재시작합니다.
-    /// TargetClosedException 등의 오류 복구용입니다.
+    /// WebView 서비스를 강제로 종료하고 재시작합니다.
+    /// 오류 복구용입니다.
     /// </summary>
     public async Task ForceRestartBrowserServicesAsync()
     {
-        AppendLog("[WARN] 브라우저 서비스 강제 재시작 시작...");
+        AppendLog("[WARN] WebView 서비스 강제 재시작 시작...");
         
-        // 1. 기존 자동화 인스턴스 정리
-        if (browserAutomation != null)
-        {
-            AppendLog("[INFO] PuppeteerGeminiAutomation 종료 중...");
-            try
-            {
-                if (browserAutomation is IDisposable disposable)
-                    disposable.Dispose();
-            }
-            catch (Exception ex) { AppendLog($"[WARN] 자동화 종료 중 예외: {ex.Message}"); }
-            browserAutomation = null;
-        }
-
-        // 2. WebView 자동화 정리
+        // 1. WebView 자동화 정리
         if (automation != null)
         {
             AppendLog("[INFO] GeminiAutomation 정리 중...");
             automation = null;
         }
 
-        // 3. Isolated Browser 종료
-        if (isolatedBrowserManager != null)
-        {
-            AppendLog("[INFO] IsolatedBrowserManager 종료 중...");
-            try
-            {
-                await isolatedBrowserManager.CloseBrowserAsync();
-            }
-            catch (Exception ex) { AppendLog($"[WARN] 브라우저 종료 중 예외: {ex.Message}"); }
-        }
-
-        // 4. WebView 정리
+        // 2. WebView 정리
         if (webView != null && webView.CoreWebView2 != null)
         {
              // WebView2 컨트롤은 Dispose하기보다 페이지를 새로고침하는 것이 안전함
              try { webView.Reload(); } catch {}
         }
 
-        // 5. 상태 초기화
-        useBrowserMode = false;
+        // 3. 상태 초기화
         useWebView2Mode = false;
-        UpdateStatus("🔄 브라우저 서비스 재시작됨 - 모드 재선택 필요", UiTheme.ColorWarning);
+        UpdateStatus("🔄 WebView 서비스 재시작됨 - 모드 재선택 필요", UiTheme.ColorWarning);
         UpdateModeButtonsUI(null); // 모든 강조 해제
         
         // 버튼 상태 복구
         if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
-        if (btnModeBrowser != null) btnModeBrowser.Enabled = true;
-        AppendLog("[SUCCESS] 브라우저 서비스 강제 재시작 완료");
+        AppendLog("[SUCCESS] WebView 서비스 강제 재시작 완료");
+
+        await Task.CompletedTask;
     }
 
     /// <summary>
@@ -697,12 +636,10 @@ public partial class MainForm : Form
         // 기본 색상 정의
         if (btnModeHttp != null) btnModeHttp.BackColor = (btnModeHttp == activeButton) ? UiTheme.ColorPrimary : UiTheme.ColorSurfaceLight;
         if (btnModeWebView != null) btnModeWebView.BackColor = (btnModeWebView == activeButton) ? UiTheme.ColorPrimary : UiTheme.ColorSurfaceLight;
-        if (btnModeBrowser != null) btnModeBrowser.BackColor = (btnModeBrowser == activeButton) ? UiTheme.ColorPrimary : UiTheme.ColorSurfaceLight;
         
         // 선택된 버튼 텍스트 두껍게 (선택 사항)
         if (btnModeHttp != null) btnModeHttp.Font = new Font(btnModeHttp.Font, btnModeHttp == activeButton ? FontStyle.Bold : FontStyle.Regular);
         if (btnModeWebView != null) btnModeWebView.Font = new Font(btnModeWebView.Font, btnModeWebView == activeButton ? FontStyle.Bold : FontStyle.Regular);
-        if (btnModeBrowser != null) btnModeBrowser.Font = new Font(btnModeBrowser.Font, btnModeBrowser == activeButton ? FontStyle.Bold : FontStyle.Regular);
     }
     
     // 설정 화면 폼 인스턴스들
@@ -752,7 +689,6 @@ public partial class MainForm : Form
     private void BtnModeHttpSettings_Click(object? sender, EventArgs e)
     {
         useWebView2Mode = false;
-        useBrowserMode = false;
         UpdateModeButtonsUI(btnModeHttp);
         if (btnNanoBanana != null) btnNanoBanana.Enabled = true; // HTTP 모드에서는 NanoBanana 사용 가능
         _httpSettingsForm ??= new Forms.HttpSettingsForm(cookiePath, profileDir);
@@ -786,117 +722,58 @@ public partial class MainForm : Form
 
 
     /// <summary>
-    /// [WebView 모드] 버튼 클릭 시 호출 - WebView2 기반 세션을 시작합니다.
+    /// [WebView 모드] 버튼 클릭 시 호출 - WebView 설정 창을 엽니다.
     /// </summary>
+    private Forms.WebViewSettingsForm? _webViewSettingsForm;
+    
     private async void BtnModeWebView_Click(object? sender, EventArgs e)
     {
         try
         {
-            useWebView2Mode = true;
-            useBrowserMode = false;
-            UpdateModeButtonsUI(btnModeWebView);
-            if (btnNanoBanana != null) btnNanoBanana.Enabled = true; // WebView 모드에서는 NanoBanana 사용 가능
-
-
-            // 이미 초기화되어 있다면 리턴
-            if (webView != null && webView.CoreWebView2 != null)
+            // 설정 창이 이미 열려있으면 포커스
+            if (_webViewSettingsForm != null && !_webViewSettingsForm.IsDisposed)
             {
-                 UpdateStatus("WebView 모드 활성화됨", Color.Green);
-                 return;
+                _webViewSettingsForm.BringToFront();
+                return;
             }
-
-            // 초기화
-            InitializeWebView2Async();
             
-            // 모델 선택 지연 적용
-
+            // WebView 설정 창 열기
+            _webViewSettingsForm = new Forms.WebViewSettingsForm(profileDir);
+            _webViewSettingsForm.OnLog += msg => AppendLog(msg);
+            _webViewSettingsForm.OnModeChanged += (useLoginMode) =>
+            {
+                useWebView2Mode = true;
+                UpdateModeButtonsUI(btnModeWebView);
+                if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
+                
+                // 버튼 텍스트 업데이트 (현재 모드 표시)
+                var modeText = useLoginMode ? "로그인" : "비로그인";
+                if (btnModeWebView != null)
+                {
+                    btnModeWebView.Text = $"WebView ({modeText})";
+                }
+                
+                UpdateStatus($"WebView {modeText} 모드 활성화됨", Color.Green);
+                AppendLog($"[WebView] 모드 변경: {modeText}");
+                
+                // WebView2 초기화
+                if (webView == null || webView.CoreWebView2 == null)
+                {
+                    InitializeWebView2Async();
+                }
+            };
+            
+            // 독립 창으로 표시 (비모달)
+            _webViewSettingsForm.Show();
+            _webViewSettingsForm.BringToFront();
         }
         catch (Exception ex)
         {
-            AppendLog($"[ERROR] WebView 모드 초기화 오류: {ex.Message}");
+            AppendLog($"[ERROR] WebView 설정 오류: {ex.Message}");
         }
     }
 
-    /// <summary>
-    /// [브라우저 모드] 버튼 클릭 시 호출 - Puppeteer 기반 독립 브라우저를 컨트롤합니다.
-    /// GlobalBrowserState를 통해 NanoBanana와의 충돌을 방지합니다.
-    /// </summary>
-    private Forms.BrowserSettingsForm? _browserSettingsForm;
-
-    /// <summary>
-    /// [브라우저 모드] 버튼 클릭 시 호출 - 브라우저 설정 창을 엽니다.
-    /// </summary>
-    private void BtnModeBrowser_Click(object? sender, EventArgs e)
-    {
-        // 1. 이미 열려있으면 포커스
-        if (_browserSettingsForm != null && !_browserSettingsForm.IsDisposed)
-        {
-            _browserSettingsForm.BringToFront();
-            return;
-        }
-
-        // 2. 새 폼 생성
-        _browserSettingsForm = new Forms.BrowserSettingsForm();
-        _browserSettingsForm.OnLog += msg => AppendLog($"[BrowserForm] {msg}");
-        
-        // 3. 브라우저 상태 변경 감지
-        _browserSettingsForm.OnBrowserModeChanged += (isConnected) =>
-        {
-            if (isConnected)
-            {
-                // 연결됨: MainForm 상태 업데이트
-                this.browserAutomation = _browserSettingsForm.CurrentAutomation;
-                this.useBrowserMode = true;
-                this.useWebView2Mode = false;
-                
-                UpdateModeButtonsUI(btnModeBrowser);
-                UpdateStatus("브라우저 모드 활성화됨 (Edge CDP)", Color.Lime);
-                
-                if (btnNanoBanana != null) 
-                {
-                    // NanoBanana 버튼은 활성화 상태 유지 (클릭 시 브라우저 모드 자동 해제)
-                    AppendLog("[알림] 브라우저 모드 중 NanoBanana를 실행하면 브라우저 모드가 자동 해제됩니다.");
-                }
-                
-
-            }
-            else
-            {
-                // 연결 끊김
-                this.browserAutomation = null;
-                this.useBrowserMode = false;
-                UpdateModeButtonsUI(null);
-                UpdateStatus("브라우저 모드 종료됨", Color.Yellow);
-                if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
-            }
-        };
-
-        _browserSettingsForm.Show();
-    }
     
-    /// <summary>
-    /// GlobalBrowserState 소유권 변경 이벤트 핸들러
-    /// </summary>
-    private void OnGlobalBrowserOwnerChanged(BrowserOwner oldOwner, BrowserOwner newOwner)
-    {
-        // MainForm 브라우저 모드가 해제되었을 때 UI 업데이트
-        if (oldOwner == BrowserOwner.MainFormBrowserMode && newOwner != BrowserOwner.MainFormBrowserMode)
-        {
-            BeginInvoke(() =>
-            {
-                // 브라우저 폼이 열려있다면 닫아주거나 상태 업데이트
-                // 여기서는 상태만 업데이트
-                if (useBrowserMode)
-                {
-                    this.browserAutomation = null;
-                    this.useBrowserMode = false;
-                    UpdateModeButtonsUI(null);
-                    UpdateStatus("브라우저가 다른 프로세스에 의해 점유됨", Color.Orange);
-                    if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
-                }
-            });
-        }
-    }
     
     /// <summary>
     /// [프롬프트 검토] 버튼 클릭 시 호출 - 실제로 AI에게 전송될 프롬프트 전문을 미리 보여줍니다.
@@ -937,19 +814,11 @@ public partial class MainForm : Form
     }
     
     /// <summary>
-    /// 통합 설정 버튼 클릭 - TranslationSettingsForm 열기
+    /// 통합 설정 버튼 클릭 - TranslationSettingsFormEx 열기 (파일 모드 + 단어장 편집 통합)
     /// </summary>
     private void BtnSettings_Click(object? sender, EventArgs e)
     {
-        var currentLang = cmbTargetLang.SelectedItem?.ToString();
-        var currentStyle = cmbStyle.SelectedItem?.ToString();
-        
-        using (var settingsForm = new GeminiWebTranslator.Forms.TranslationSettingsForm(
-            currentSettings,
-            currentLang,
-            currentStyle,
-            CustomTranslationPrompt,
-            loadedGlossaryPath))
+        using (var settingsForm = new GeminiWebTranslator.Forms.TranslationSettingsFormEx(currentSettings))
         {
             if (settingsForm.ShowDialog() == DialogResult.OK)
             {
@@ -974,6 +843,50 @@ public partial class MainForm : Form
                 {
                     CustomTranslationPrompt = null;
                     UpdateSettingsStatusUI();
+                }
+                
+                // 파일 모드 통합 처리
+                if (!string.IsNullOrEmpty(settingsForm.LoadedFilePath) && !string.IsNullOrEmpty(settingsForm.LoadedFileContent))
+                {
+                    loadedFilePath = settingsForm.LoadedFilePath;
+                    isFileMode = true;
+                    txtInput.ReadOnly = true;
+                    
+                    var ext = Path.GetExtension(loadedFilePath).ToLower();
+                    if (ext == ".json")
+                    {
+                        loadedJsonData = Newtonsoft.Json.Linq.JToken.Parse(settingsForm.LoadedFileContent);
+                        loadedTsvLines = null;
+                        txtInput.Text = $"[파일 모드] JSON ({Path.GetFileName(loadedFilePath)})\n'번역하기' 클릭";
+                    }
+                    else if (ext == ".tsv")
+                    {
+                        loadedTsvLines = settingsForm.LoadedFileContent.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).ToList();
+                        loadedJsonData = null;
+                        txtInput.Text = $"[파일 모드] TSV ({loadedTsvLines.Count}행)\n'번역하기' 클릭";
+                    }
+                    else
+                    {
+                        // 일반 텍스트 파일
+                        txtInput.Text = settingsForm.LoadedFileContent;
+                        isFileMode = false;
+                        txtInput.ReadOnly = false;
+                    }
+                    
+                    AppendLog($"[설정] 파일 로드됨: {Path.GetFileName(settingsForm.LoadedFilePath)}");
+                }
+                else
+                {
+                    // 파일 닫힘 처리
+                    if (isFileMode)
+                    {
+                        isFileMode = false;
+                        loadedFilePath = null;
+                        loadedJsonData = null;
+                        loadedTsvLines = null;
+                        txtInput.Clear();
+                        txtInput.ReadOnly = false;
+                    }
                 }
                 
                 // 단어장 로그
@@ -1048,42 +961,23 @@ public partial class MainForm : Form
             AppendLog("[번역] NanoBanana 실행을 위해 번역을 중단합니다.");
         }
         
-        // 1. MainForm의 브라우저 모드가 활성화되어 있으면 먼저 해제 (포트 충돌 방지)
-        if (useBrowserMode)
-        {
-            AppendLog("[NanoBanana] MainForm 브라우저 모드 해제 중...");
-            await GlobalBrowserState.Instance.ReleaseBrowserAsync(BrowserOwner.MainFormBrowserMode);
-            useBrowserMode = false;
-            browserAutomation = null;
-            if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
-            UpdateStatus("브라우저 모드 해제됨", Color.Yellow);
-        }
-        
-        // 2. NanoBanana 안내 메시지 표시
-        //    WebView 모드에서는 이미지 기능이 지원되지 않으므로 독립 브라우저를 사용함
-        AppendLog("[NanoBanana] 독립 브라우저 (Chrome for Testing)로 이미지 처리를 시작합니다.");
-        AppendLog("[알림] WebView 모드는 비로그인 상태이므로 이미지 기능이 지원되지 않습니다.");
+        // NanoBanana 안내 메시지 표시
+        AppendLog("[NanoBanana] WebView2 기반 이미지 처리를 시작합니다.");
         
         SetMainModesEnabled(false);
 
-        // 3. NanoBanana 폼 생성 (독립 브라우저 모드에서 작동)
-        //    WebView와 automation을 전달하지 않음 - NanoBanana는 자체 브라우저를 사용
+        // NanoBanana 폼 생성 (WebView2 모드)
         _nanoBananaForm = new NanoBananaMainForm(null, null);
         
-        _nanoBananaForm.FormClosed += async (ss, ee) =>
+        _nanoBananaForm.FormClosed += (ss, ee) =>
         {
-            // NanoBanana가 사용한 브라우저 소유권 해제
-            if (GlobalBrowserState.Instance.IsOwnedBy(BrowserOwner.NanoBanana))
-            {
-                await GlobalBrowserState.Instance.ReleaseBrowserAsync(BrowserOwner.NanoBanana);
-                AppendLog("[NanoBanana] 브라우저 소유권 반환됨");
-            }
-            
             _nanoBananaForm = null;
             SetMainModesEnabled(true); // NanoBanana 종료 시 제약 해제
         };
         
         _nanoBananaForm.Show();
+
+        await Task.CompletedTask;
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -1097,32 +991,8 @@ public partial class MainForm : Form
             translationCancellation.Cancel();
         }
 
-        // 3. 브라우저 자동화 정리
-        if (browserAutomation is IDisposable disposable)
-        {
-            try { disposable.Dispose(); } catch { }
-        }
-        browserAutomation = null;
-        useBrowserMode = false;
-
-        // 4. GlobalBrowserState 강제 해제 (모든 브라우저 종료)
-        _ = Task.Run(async () => {
-            try
-            {
-                var browserState = GlobalBrowserState.Instance;
-                if (browserState.CurrentOwner != BrowserOwner.None)
-                {
-                    await browserState.ForceReleaseAsync();
-                }
-                
-                httpClient?.Dispose();
-                if (isolatedBrowserManager != null) 
-                {
-                    await isolatedBrowserManager.CloseBrowserAsync();
-                }
-            }
-            catch { /* 종료 중 예외 무시 */ }
-        });
+        // 3. HTTP 클라이언트 정리
+        httpClient?.Dispose();
 
         base.OnFormClosing(e);
     }
@@ -1133,7 +1003,6 @@ public partial class MainForm : Form
     private void SetMainModesEnabled(bool enabled)
     {
         if (btnModeHttp != null) btnModeHttp.Enabled = enabled;
-        if (btnModeBrowser != null) btnModeBrowser.Enabled = enabled;
         
         if (!enabled)
         {

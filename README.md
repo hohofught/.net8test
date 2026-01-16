@@ -77,7 +77,7 @@ GeminiWebTranslator_Net8/
 │   ├── MainForm.FileHandlers.cs # 파일 처리 로직
 │   ├── BrowserSettingsForm.cs  # 브라우저 설정 창
 │   ├── HttpSettingsForm.cs     # HTTP API 설정 창
-│   ├── PromptCustomizationForm.cs # 프롬프트 커스터마이징
+│   ├── TranslationSettingsFormEx.cs # 통합 설정 + 파일 모드
 │   └── DebugForm.cs            # 디버깅 및 로그 뷰어
 │
 ├── 📁 Services/                # 비즈니스 로직
@@ -124,7 +124,7 @@ GeminiWebTranslator_Net8/
 | 라이브러리 | 버전 | 용도 |
 |-----------|------|------|
 | `PuppeteerSharp` | 20.2.5 | 독립 브라우저 제어 (Chromium) |
-| `Microsoft.Web.WebView2` | 1.0.2903.40 | 내장 브라우저 (Edge WebView2) |
+| `Microsoft.Web.WebView2` | * (최신) | 내장 브라우저 (Edge WebView2, 항상 최신 버전 자동 적용) |
 | `Newtonsoft.Json` | 13.0.3 | JSON 파싱 및 직렬화 |
 | `Custom OCR Engine` | - | Native DLL 기반 고속 OCR |
 

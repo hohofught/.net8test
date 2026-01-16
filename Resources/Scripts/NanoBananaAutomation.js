@@ -14,6 +14,143 @@ const NanoBanana = {
         return window.GeminiCommon;
     },
 
+    // ========== 페이지 상태 체크 및 오류 복구 ==========
+
+    /**
+     * 페이지 상태 확인 - 500 에러, 로딩 상태 등 감지
+     * @returns {{healthy: boolean, errorType: string|null, message: string, needsWait: boolean}}
+     */
+    checkPageHealth: function () {
+        // 1. Google 500 에러 페이지 감지
+        const pageText = document.body?.innerText || '';
+        const pageTitle = document.title || '';
+
+        // "500. 오류가 발생했습니다" 패턴
+        if (pageText.includes('500.') && (pageText.includes('오류') || pageText.includes('error'))) {
+            return { healthy: false, errorType: 'server_500', message: 'Gemini 500 서버 오류', needsWait: true };
+        }
+
+        // "Error 500" 또는 유사 패턴
+        if (pageTitle.includes('500') || pageTitle.includes('Error') || pageTitle.includes('오류')) {
+            return { healthy: false, errorType: 'server_error', message: '서버 오류 페이지', needsWait: true };
+        }
+
+        // "문제가 발생했습니다" 또는 "Something went wrong"
+        if (pageText.includes('문제가 발생') || pageText.includes('Something went wrong')) {
+            return { healthy: false, errorType: 'general_error', message: '일반 오류', needsWait: true };
+        }
+
+        // "나중에 다시 시도" 메시지
+        if (pageText.includes('나중에 다시 시도') || pageText.includes('try again later')) {
+            return { healthy: false, errorType: 'rate_limit', message: '일시적 서비스 불가', needsWait: true };
+        }
+
+        // *** Gemini 로딩 페이지 감지 ("Gemini 3에게 물어보기" 등) ***
+        const hasLoadingPlaceholder = pageText.includes('물어보기') ||
+            pageText.includes('Ask Gemini') ||
+            pageText.includes('Gemini에게');
+        const inputArea = document.querySelector('.ql-editor, [contenteditable="true"]');
+        const inputText = inputArea?.innerText?.trim() || '';
+
+        // 입력창이 있지만 플레이스홀더만 있는 상태 (로딩 중)
+        if (hasLoadingPlaceholder && (!inputArea || inputText === '' || inputText.includes('물어보기'))) {
+            // 히스토리/채팅 목록이 로드되었는지 확인
+            const hasChatHistory = !!document.querySelector('[data-conversation-id], .conversation-container, .chat-history');
+            if (!hasChatHistory) {
+                return { healthy: false, errorType: 'loading', message: 'Gemini 로딩 중...', needsWait: true };
+            }
+        }
+
+        // 정상 페이지 확인 (입력창 존재 여부)
+        const hasInput = !!inputArea;
+        if (!hasInput && window.location.hostname.includes('gemini.google.com')) {
+            // Gemini 페이지인데 입력창이 없으면 로딩 중이거나 오류
+            return { healthy: false, errorType: 'loading_or_error', message: '페이지 준비 안됨', needsWait: true };
+        }
+
+        return { healthy: true, errorType: null, message: '정상', needsWait: false };
+    },
+
+    /**
+     * 페이지가 완전히 로드될 때까지 대기
+     * @param {number} maxWaitMs - 최대 대기 시간 (밀리초)
+     * @param {number} checkIntervalMs - 확인 간격 (밀리초)
+     * @returns {Promise<{ready: boolean, waitedMs: number, lastState: string}>}
+     */
+    waitForPageReady: async function (maxWaitMs = 30000, checkIntervalMs = 1000) {
+        const common = this.common;
+        const startTime = Date.now();
+        let lastState = '';
+
+        console.log('[NanoBanana] 페이지 로딩 대기 시작...');
+
+        while (Date.now() - startTime < maxWaitMs) {
+            const health = this.checkPageHealth();
+            lastState = health.message;
+
+            if (health.healthy) {
+                const waitedMs = Date.now() - startTime;
+                console.log(`[NanoBanana] 페이지 준비 완료 (${waitedMs}ms 대기)`);
+                return { ready: true, waitedMs, lastState: '정상' };
+            }
+
+            // 복구 불가능한 에러인 경우 즉시 종료
+            if (health.errorType === 'server_500' || health.errorType === 'rate_limit') {
+                console.warn(`[NanoBanana] 복구 불가능한 오류: ${health.message}`);
+                return { ready: false, waitedMs: Date.now() - startTime, lastState: health.message };
+            }
+
+            // 진행률 로깅 (5초마다)
+            const elapsed = Date.now() - startTime;
+            if (elapsed % 5000 < checkIntervalMs) {
+                console.log(`[NanoBanana] 대기 중... ${Math.floor(elapsed / 1000)}초 경과 (${health.message})`);
+            }
+
+            await common.delay(checkIntervalMs);
+        }
+
+        console.warn(`[NanoBanana] 페이지 로딩 타임아웃 (${maxWaitMs}ms)`);
+        return { ready: false, waitedMs: maxWaitMs, lastState };
+    },
+
+    /**
+     * 페이지 오류 시 자동 복구
+     * @param {number} maxRetries - 최대 재시도 횟수
+     * @returns {Promise<{success: boolean, message: string}>}
+     */
+    recoverFromError: async function (maxRetries = 3) {
+        const common = this.common;
+        console.log('[NanoBanana] 페이지 오류 복구 시도...');
+
+        // 먼저 로딩 대기 시도
+        const waitResult = await this.waitForPageReady(15000, 1000);
+        if (waitResult.ready) {
+            return { success: true, message: '로딩 대기 후 정상화됨' };
+        }
+
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            console.log(`[NanoBanana] 복구 시도 ${attempt}/${maxRetries}`);
+
+            // 새 페이지로 이동
+            window.location.href = 'https://gemini.google.com/app';
+
+            // 페이지 로딩 대기
+            await common.delay(3000);
+
+            // 로딩 완료 대기
+            const loadResult = await this.waitForPageReady(10000, 1000);
+            if (loadResult.ready) {
+                console.log('[NanoBanana] 페이지 복구 성공!');
+                return { success: true, message: '페이지 복구 완료' };
+            }
+
+            // 추가 대기 후 재시도
+            await common.delay(2000);
+        }
+
+        return { success: false, message: '페이지 복구 실패 - 수동 개입 필요' };
+    },
+
     // ========== 모드 및 환경 설정 ==========
 
     /**
@@ -278,7 +415,8 @@ const NanoBanana = {
     // ========== 응답 대기 및 이미지 다운로드 ==========
 
     /**
-     * 응답 생성 완료 대기 (이미지 생성 전용)
+     * 응답 생성 완료 대기 (이미지 생성 전용) - 2026.01 강화 버전
+     * 오류 상태 감지, 진행률 로깅, 연결 끊김 방지 추가
      */
     waitForResponse: async function (timeout = 180000) {
         console.log('[NanoBanana] Waiting for AI response...');
@@ -286,8 +424,56 @@ const NanoBanana = {
         const startTime = Date.now();
         let lastResponseText = '';
         let stableCount = 0;
+        let lastProgressLog = 0;
 
         while (Date.now() - startTime < timeout) {
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+
+            // 진행률 로깅 (10초마다)
+            if (elapsed - lastProgressLog >= 10) {
+                console.log(`[NanoBanana] 응답 대기 중... (${elapsed}초 경과)`);
+                lastProgressLog = elapsed;
+            }
+
+            // 오류 상태 감지 (Rate limit, Error 등)
+            const errorCheck = (function () {
+                // 오류 메시지 탐지
+                const errorSelectors = [
+                    '.error-message',
+                    '.rate-limit-message',
+                    '[class*="error"]',
+                    '.snackbar-error'
+                ];
+                for (const sel of errorSelectors) {
+                    const el = document.querySelector(sel);
+                    if (el && el.offsetParent !== null && el.innerText) {
+                        const text = el.innerText.toLowerCase();
+                        if (text.includes('error') || text.includes('오류') ||
+                            text.includes('limit') || text.includes('제한') ||
+                            text.includes('try again') || text.includes('다시 시도')) {
+                            return { hasError: true, message: el.innerText.substring(0, 100) };
+                        }
+                    }
+                }
+
+                // 응답 내용에서 오류 탐지
+                const lastResponse = document.querySelector('.model-response-text:last-child, .markdown:last-child');
+                if (lastResponse) {
+                    const text = lastResponse.innerText.toLowerCase();
+                    if (text.includes('i cannot') || text.includes('i can\'t') ||
+                        text.includes('unable to') || text.includes('할 수 없')) {
+                        return { hasError: true, message: '생성 불가 응답 감지' };
+                    }
+                }
+
+                return { hasError: false };
+            })();
+
+            if (errorCheck.hasError) {
+                console.error(`[NanoBanana] 오류 감지: ${errorCheck.message}`);
+                return { success: false, hasImage: false, message: `오류: ${errorCheck.message}`, errorType: 'response_error' };
+            }
+
             // 1. 생성 중 여부 판단 (여러 지표 확인)
             const isBusy = (function () {
                 const sendBtn = document.querySelector('.send-button');
@@ -304,7 +490,7 @@ const NanoBanana = {
 
             if (isBusy) {
                 stableCount = 0;
-                await common.delay(1500);
+                await common.delay(1000); // 1초로 단축
                 continue;
             }
 
@@ -314,9 +500,10 @@ const NanoBanana = {
 
             if (currentResponse && currentResponse === lastResponseText) {
                 stableCount++;
-                // 3회 연속(약 4.5초) 변화 없으면 완료
+                // 3회 연속(약 3초) 변화 없으면 완료
                 if (stableCount >= 3) {
                     const hasImage = !!document.querySelector("img[src*='googleusercontent'], .generated-image, model-response img");
+                    console.log(`[NanoBanana] 응답 완료 (${elapsed}초), 이미지: ${hasImage}`);
                     return { success: true, hasImage, message: '응답 생성 완료' };
                 }
             } else {
@@ -324,10 +511,14 @@ const NanoBanana = {
                 lastResponseText = currentResponse;
             }
 
-            await common.delay(1500);
+            await common.delay(1000); // 1초로 단축
         }
 
-        return { success: false, message: '응답 대기 시간 초과' };
+        // 타임아웃 시 응답 중지 시도
+        console.warn('[NanoBanana] 응답 대기 타임아웃 - 중지 시도...');
+        this.stopGeminiResponse();
+
+        return { success: false, hasImage: false, message: '응답 대기 시간 초과', errorType: 'timeout' };
     },
 
     /**
@@ -400,7 +591,7 @@ const NanoBanana = {
     // ========== 채팅 관리 ==========
 
     /**
-     * 현재 채팅 삭제
+     * 현재 채팅 삭제 - 2026.01 대기시간 최적화
      */
     deleteCurrentChat: async function () {
         try {
@@ -410,7 +601,7 @@ const NanoBanana = {
             if (!menuBtn) return { success: false, message: '메뉴 버튼 없음' };
 
             common.safeClick(menuBtn);
-            await common.delay(600);
+            await common.delay(400); // 600ms → 400ms
 
             const deleteItem = Array.from(document.querySelectorAll('[role="menuitem"], button.mat-mdc-menu-item'))
                 .find(el => el.innerText.includes('삭제') || el.innerText.includes('Delete'));
@@ -421,14 +612,14 @@ const NanoBanana = {
             }
 
             common.safeClick(deleteItem);
-            await common.delay(800);
+            await common.delay(400); // 800ms → 400ms
 
             const confirmBtn = Array.from(document.querySelectorAll('mat-dialog-actions button, .mat-mdc-dialog-actions button'))
                 .find(el => el.innerText.includes('삭제') || el.innerText.includes('Delete'));
 
             if (confirmBtn) {
                 common.safeClick(confirmBtn);
-                await common.delay(1000);
+                await common.delay(500); // 1000ms → 500ms
                 return { success: true, message: '삭제 완료' };
             }
 

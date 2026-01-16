@@ -227,7 +227,7 @@ namespace GeminiWebTranslator
         /// <summary>
         /// 입력창에 메시지를 타이핑하고 전송 버튼을 클릭합니다.
         /// </summary>
-        public async Task<bool> SendMessageAsync(string message)
+        public async Task<bool> SendMessageAsync(string message, bool preserveAttachment = false)
         {
             try
             {

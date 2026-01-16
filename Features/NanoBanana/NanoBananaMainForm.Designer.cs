@@ -23,7 +23,7 @@ partial class NanoBananaMainForm
             components?.Dispose();
             _cts?.Cancel();
             _cts?.Dispose();
-            _edgeCdpAutomation?.Dispose();
+            // SharedWebViewManager는 싱글톤이므로 여기서 Dispose하지 않음
         }
         base.Dispose(disposing);
     }
@@ -50,6 +50,7 @@ partial class NanoBananaMainForm
         this.btnBrowseOutput = new System.Windows.Forms.Button();
         this.lblPrompt = new System.Windows.Forms.Label();
         this.txtPrompt = new System.Windows.Forms.TextBox();
+        this.btnResetPrompt = new System.Windows.Forms.Button();
         this.flowOptions = new System.Windows.Forms.FlowLayoutPanel();
         this.chkProMode = new System.Windows.Forms.CheckBox();
         this.chkImageGen = new System.Windows.Forms.CheckBox();
@@ -61,9 +62,12 @@ partial class NanoBananaMainForm
         this.btnStart = new System.Windows.Forms.Button();
         this.btnStop = new System.Windows.Forms.Button();
         this.btnReset = new System.Windows.Forms.Button();
+        this.btnClearList = new System.Windows.Forms.Button();
         this.btnRefresh = new System.Windows.Forms.Button();
         this.btnShowBrowser = new System.Windows.Forms.Button();
         this.progressBar = new System.Windows.Forms.ProgressBar();
+        this.lblSort = new System.Windows.Forms.Label();
+        this.cboSort = new System.Windows.Forms.ComboBox();
         this.lblProgress = new System.Windows.Forms.Label();
         this.grpLog = new System.Windows.Forms.GroupBox();
         this.txtLog = new System.Windows.Forms.RichTextBox();
@@ -121,7 +125,7 @@ partial class NanoBananaMainForm
         // flowControls (Bottom bar with buttons)
         // 
         this.flowControls.Dock = System.Windows.Forms.DockStyle.Bottom;
-        this.flowControls.Height = 55;
+        this.flowControls.Height = 60;
         this.flowControls.Padding = new System.Windows.Forms.Padding(0, 5, 0, 5);
         this.flowControls.WrapContents = true;
         this.flowControls.AutoSize = false;
@@ -146,7 +150,14 @@ partial class NanoBananaMainForm
         this.btnReset.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
         this.btnReset.BackColor = UiTheme.ColorSurfaceLight;
         this.btnReset.ForeColor = System.Drawing.Color.White;
-        this.btnReset.Margin = new System.Windows.Forms.Padding(0, 0, 10, 0);
+        this.btnReset.Margin = new System.Windows.Forms.Padding(0, 0, 5, 0);
+        
+        this.btnClearList.Text = "🗑️ 삭제";
+        this.btnClearList.Size = new System.Drawing.Size(80, 40);
+        this.btnClearList.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+        this.btnClearList.BackColor = UiTheme.ColorError;
+        this.btnClearList.ForeColor = System.Drawing.Color.White;
+        this.btnClearList.Margin = new System.Windows.Forms.Padding(0, 0, 10, 0);
         
         this.btnRefresh.Text = "📁 새로고침";
         this.btnRefresh.Size = new System.Drawing.Size(100, 40);
@@ -179,7 +190,7 @@ partial class NanoBananaMainForm
         this.btnHideBrowser.Margin = new System.Windows.Forms.Padding(0, 0, 10, 0);
         
         this.flowControls.Controls.AddRange(new System.Windows.Forms.Control[] { 
-            this.btnStart, this.btnStop, this.btnReset, this.btnRefresh, this.btnShowBrowser, this.btnHideBrowser, this.progressBar, this.lblProgress 
+            this.btnStart, this.btnStop, this.btnReset, this.btnClearList, this.btnRefresh, this.btnShowBrowser, this.btnHideBrowser, this.progressBar, this.lblProgress 
         });
 
         // 
@@ -230,8 +241,8 @@ partial class NanoBananaMainForm
         
         var panelBrowser = new System.Windows.Forms.FlowLayoutPanel { Dock = System.Windows.Forms.DockStyle.Fill, Margin = new System.Windows.Forms.Padding(0) };
         
-        this.btnLaunchIsolated.Text = "🚀 Chrome 실행/설치";
-        this.btnLaunchIsolated.Size = new System.Drawing.Size(180, 32);
+        this.btnLaunchIsolated.Text = "🚀 WebView 로그인";
+        this.btnLaunchIsolated.Size = new System.Drawing.Size(150, 32);
         this.btnLaunchIsolated.BackColor = UiTheme.ColorPrimary;
         this.btnLaunchIsolated.ForeColor = System.Drawing.Color.White;
         this.btnLaunchIsolated.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
@@ -240,7 +251,7 @@ partial class NanoBananaMainForm
 
         var lblStatusInfo = new System.Windows.Forms.Label
         {
-            Text = "(독립 브라우저로 Google 로그인)",
+            Text = "(WebView2 기반 로그인)",
             AutoSize = true,
             ForeColor = System.Drawing.Color.FromArgb(150, 150, 160),
             Margin = new Padding(0, 10, 0, 0),
@@ -338,9 +349,18 @@ partial class NanoBananaMainForm
         this.txtPrompt.ForeColor = System.Drawing.Color.White;
         this.txtPrompt.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
         
+        this.btnResetPrompt.Text = "↩️";
+        this.btnResetPrompt.Dock = System.Windows.Forms.DockStyle.Fill;
+        this.btnResetPrompt.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+        this.btnResetPrompt.BackColor = UiTheme.ColorSurfaceLight;
+        this.btnResetPrompt.ForeColor = System.Drawing.Color.White;
+        this.btnResetPrompt.Font = new System.Drawing.Font("Segoe UI", 10F);
+        var tooltipResetPrompt = new System.Windows.Forms.ToolTip();
+        tooltipResetPrompt.SetToolTip(this.btnResetPrompt, "기본값 복원");
+        
         this.layoutSettings.Controls.Add(this.lblPrompt, 0, 4);
         this.layoutSettings.Controls.Add(this.txtPrompt, 1, 4);
-        this.layoutSettings.SetColumnSpan(this.txtPrompt, 2);
+        this.layoutSettings.Controls.Add(this.btnResetPrompt, 2, 4);
 
         // 
         // innerSplit.Panel2 - Image List
@@ -351,7 +371,30 @@ partial class NanoBananaMainForm
         // 
         // grpImageList
         // 
+        var pnlSortHeader = new System.Windows.Forms.Panel();
+        pnlSortHeader.Dock = System.Windows.Forms.DockStyle.Top;
+        pnlSortHeader.Height = 30;
+        pnlSortHeader.Padding = new System.Windows.Forms.Padding(5, 2, 5, 2);
+        
+        this.lblSort.Text = "정렬:";
+        this.lblSort.AutoSize = true;
+        this.lblSort.ForeColor = System.Drawing.Color.White;
+        this.lblSort.Location = new System.Drawing.Point(5, 7);
+        
+        this.cboSort.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
+        this.cboSort.Items.AddRange(new object[] { "이름순 ↑", "이름순 ↓", "수정일순 ↑", "수정일순 ↓", "크기순 ↑", "크기순 ↓" });
+        this.cboSort.SelectedIndex = 0;
+        this.cboSort.Size = new System.Drawing.Size(120, 23);
+        this.cboSort.Location = new System.Drawing.Point(45, 3);
+        this.cboSort.BackColor = UiTheme.ColorSurface;
+        this.cboSort.ForeColor = System.Drawing.Color.White;
+        this.cboSort.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+        
+        pnlSortHeader.Controls.Add(this.lblSort);
+        pnlSortHeader.Controls.Add(this.cboSort);
+        
         this.grpImageList.Controls.Add(this.dgvImages);
+        this.grpImageList.Controls.Add(pnlSortHeader);
         this.grpImageList.Dock = System.Windows.Forms.DockStyle.Fill;
         this.grpImageList.Text = "이미지 목록";
         this.grpImageList.ForeColor = System.Drawing.Color.WhiteSmoke;
@@ -445,6 +488,7 @@ partial class NanoBananaMainForm
     
     private System.Windows.Forms.Label lblPrompt;
     private System.Windows.Forms.TextBox txtPrompt;
+    private System.Windows.Forms.Button btnResetPrompt;
     
     private System.Windows.Forms.CheckBox chkProMode;
     private System.Windows.Forms.CheckBox chkImageGen;
@@ -460,10 +504,13 @@ partial class NanoBananaMainForm
     private System.Windows.Forms.Button btnStart;
     private System.Windows.Forms.Button btnStop;
     private System.Windows.Forms.Button btnReset;
+    private System.Windows.Forms.Button btnClearList;
     private System.Windows.Forms.Button btnRefresh;
     private System.Windows.Forms.Button btnShowBrowser;
     private System.Windows.Forms.ProgressBar progressBar;
     private System.Windows.Forms.Label lblProgress;
+    private System.Windows.Forms.Label lblSort;
+    private System.Windows.Forms.ComboBox cboSort;
     
     private System.Windows.Forms.RichTextBox txtLog;
 }

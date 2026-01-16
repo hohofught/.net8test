@@ -15,7 +15,15 @@ public class GeminiAutomation : IGeminiAutomation
     private const int MaxWaitSeconds = 120; // 서버 응답 최대 대기 시간 (초)
     private const int PollIntervalMs = 80;  // 브라우저 상태 확인 간격 (ms)
     private readonly SemaphoreSlim _lock = new(1, 1); // 동시성 제어를 위한 세마포어
-    // private bool _isDiagnosing = false; // 미사용 필드 주석 처리 또는 제거
+    
+    // === 세션 자동 갱신 시스템 (MORT-main 패턴) ===
+    private const int SESSION_REFRESH_INTERVAL = 15;  // 15회마다 세션 갱신
+    private int _translationCount = 0;
+    
+    // === 갱신 중 요청 보류 메커니즘 ===
+    private volatile bool _isRefreshing = false;      // 세션 갱신 중 플래그
+    private string? _pendingPrompt = null;            // 갱신 중 대기 요청
+    private readonly object _refreshLock = new();     // 스레드 동기화
     
     // 빈번한 스크립트 생성을 고려한 리소스 최적화용 빌더
     private readonly StringBuilder _scriptBuilder = new(2048);
@@ -25,6 +33,12 @@ public class GeminiAutomation : IGeminiAutomation
     /// </summary>
     public event Action<string>? OnLog;
     private void Log(string message) => OnLog?.Invoke($"[WebView2] {message}");
+    
+    /// <summary>
+    /// 세션 갱신 등 상태 변경을 외부로 알리는 이벤트
+    /// </summary>
+    public event Action<string>? OnStatusUpdate;
+    private void UpdateStatus(string msg) => OnStatusUpdate?.Invoke(msg);
 
     public GeminiAutomation(WebView2 webView)
     {
@@ -102,11 +116,23 @@ public class GeminiAutomation : IGeminiAutomation
     /// <summary>
     /// 프롬프트를 전송하고 AI의 답변 작성이 완료될 때까지 대기하여 결과를 반환합니다.
     /// 스레드 안전하게 설계되어 동시 호출 시 예외를 발생시킵니다.
+    /// 세션 자동 갱신 및 갱신 중 요청 보류 기능 포함.
     /// </summary>
     /// <param name="prompt">AI에게 전달할 요청 텍스트</param>
     /// <returns>생성된 답변 전문</returns>
     public async Task<string> GenerateContentAsync(string prompt)
     {
+        // === 1. 갱신 중 보류 처리 ===
+        lock (_refreshLock)
+        {
+            if (_isRefreshing)
+            {
+                _pendingPrompt = prompt;
+                Log("세션 갱신 중 - 요청 대기열 추가");
+                return "⏳ 세션 새로고침 중...";
+            }
+        }
+
         if (!await _lock.WaitAsync(0))
         {
             Log("이전 번역이 아직 진행 중입니다. 대기 명령을 무시합니다.");
@@ -115,6 +141,13 @@ public class GeminiAutomation : IGeminiAutomation
 
         try
         {
+            // === 2. 세션 자동 갱신 검사 (15회마다) ===
+            _translationCount++;
+            if (_translationCount >= SESSION_REFRESH_INTERVAL)
+            {
+                prompt = await RefreshSessionWithPollingAsync(prompt);
+            }
+
             // 실행 전 엔진 준비 상태 확인 및 대기
             bool isReady = await EnsureReadyAsync();
             if (!isReady)
@@ -133,12 +166,14 @@ public class GeminiAutomation : IGeminiAutomation
             // 답변 생성이 완료될 때까지 상태 폴링 대기
             var response = await WaitForResponseAsync(preCount);
             
+            // 성공 기록
+            RecordSuccess();
+            
             // 타임아웃/오류 감지 시 자동 복구 시도
             if (response.Contains("응답 없음") || response.Contains("시간 초과") || response.Contains("대기 시간"))
             {
                 Log("타임아웃 감지 - 자동 복구 시도 중...");
                 await HandleTimeoutAsync();
-                // 복구 후 딜레이
                 await Task.Delay(1000);
             }
             else
@@ -155,6 +190,93 @@ public class GeminiAutomation : IGeminiAutomation
             _lock.Release();
         }
     }
+    
+    /// <summary>
+    /// 세션 갱신 + 즉시 확인 후 폴링 패턴 (MORT-main 방식)
+    /// 대화가 길어지면 품질이 저하되므로 주기적으로 세션을 초기화합니다.
+    /// </summary>
+    private async Task<string> RefreshSessionWithPollingAsync(string originalPrompt)
+    {
+        lock (_refreshLock)
+        {
+            _isRefreshing = true;
+            _pendingPrompt = null;
+        }
+        
+        UpdateStatus("⏳ 세션 새로고침 중...");
+        Log($"세션 자동 갱신 시작 ({_translationCount}회 도달)");
+        
+        try
+        {
+            // 페이지 새로고침
+            if (_webView.CoreWebView2 != null)
+            {
+                _webView.CoreWebView2.Navigate("https://gemini.google.com/app");
+            }
+            
+            // === 즉시 확인 후 폴링 패턴 ===
+            await Task.Delay(1500);  // 최소 대기
+            
+            bool ready = false;
+            try
+            {
+                var check = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.CheckInputReadyScript);
+                if (check == "true")
+                {
+                    ready = true;
+                    Log("세션 갱신 즉시 완료 (추가 대기 없음)");
+                }
+            }
+            catch { }
+            
+            if (!ready)
+            {
+                // 폴링 (200ms × 67회 = 13.4초, 총 15초)
+                for (int i = 0; i < 67; i++)
+                {
+                    await Task.Delay(200);
+                    try
+                    {
+                        var check = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.CheckInputReadyScript);
+                        if (check == "true")
+                        {
+                            ready = true;
+                            Log($"세션 갱신 완료 ({1500 + (i+1)*200}ms)");
+                            break;
+                        }
+                    }
+                    catch { }
+                }
+            }
+            
+            _translationCount = 0;
+            UpdateStatus(ready ? "✅ 세션 갱신 완료" : "⚠️ 세션 갱신 시간 초과");
+        }
+        catch (Exception ex)
+        {
+            Log($"세션 갱신 오류: {ex.Message}");
+        }
+        finally
+        {
+            lock (_refreshLock)
+            {
+                _isRefreshing = false;
+                
+                // 갱신 중 신규 요청이 있으면 그것으로 교체
+                if (!string.IsNullOrEmpty(_pendingPrompt))
+                {
+                    originalPrompt = _pendingPrompt;
+                    Log("갱신 중 신규 요청으로 교체");
+                }
+                _pendingPrompt = null;
+            }
+        }
+        
+        return originalPrompt;
+    }
+    
+    /// <summary>번역 카운터 리셋 (외부에서 호출 가능)</summary>
+    public void ResetTranslationCount() => _translationCount = 0;
 
     /// <summary>
     /// 페이지 전체를 새로고침하여 대화 세션을 초기화합니다.
@@ -248,35 +370,138 @@ public class GeminiAutomation : IGeminiAutomation
     /// <summary>
     /// 브라우저 입력 요소에 텍스트를 프로그래밍 방식으로 주입하고 전송 명령을 수행합니다.
     /// </summary>
-    private async Task SendMessageAsync(string prompt)
+    /// <param name="prompt">전송할 프롬프트 텍스트</param>
+    /// <param name="preserveAttachment">true이면 입력창을 지우지 않고 이미지 첨부를 유지합니다</param>
+    public async Task<bool> SendMessageAsync(string prompt, bool preserveAttachment = false)
     {
-        // 1. 입력 요소 포커스 부여 및 기존 내용 초기화
-        await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.FocusAndClearScript);
-        await Task.Delay(80);
-
-        // 2. 텍스트 데이터를 JS 호환 형식으로 이스케이프하여 주입 (execCommand 사용)
-        var cleanPrompt = EscapeJsString(prompt);
-        _scriptBuilder.Clear();
-        _scriptBuilder.Append(@"(function() {
-            const input = document.querySelector('.ql-editor') || 
-                          document.querySelector('div[contenteditable=""true""]');
-            if (!input) return false;
-            input.focus();
-            document.execCommand('insertText', false, ");
-        _scriptBuilder.Append(cleanPrompt);
-        _scriptBuilder.Append(@");
-            return true;
-        })();");
-        
-        if (_webView?.CoreWebView2 != null)
+        if (preserveAttachment)
         {
-            await _webView.CoreWebView2.ExecuteScriptAsync(_scriptBuilder.ToString());
+            // 이미지 첨부 모드: 특별한 처리 필요
+            Log("이미지 첨부 모드로 프롬프트 전송...");
+            
+            var cleanPrompt = EscapeJsString(prompt);
+            
+            // 1. 첨부 파일이 있는지 먼저 확인
+            var hasAttachment = await _webView.CoreWebView2.ExecuteScriptAsync(@"
+                (function() {
+                    const selectors = [
+                        'img[src^=""blob:""]',
+                        '.input-area-container img',
+                        '.attachment-thumbnail',
+                        '.file-chip',
+                        '.attached-content img'
+                    ];
+                    for (const sel of selectors) {
+                        if (document.querySelector(sel)) return true;
+                    }
+                    return false;
+                })()
+            ");
+            Log($"첨부 파일 확인: {hasAttachment}");
+            
+            // 2. 입력창에 텍스트 삽입 (기존 내용 유지, placeholder만 대체)
+            var insertScript = $@"
+                (async function() {{
+                    const input = document.querySelector('.ql-editor') || 
+                                  document.querySelector('div[contenteditable=""true""]');
+                    if (!input) return 'no_input';
+                    
+                    // 입력창 포커스
+                    input.focus();
+                    await new Promise(r => setTimeout(r, 50));
+                    
+                    // 기존 텍스트 확인 (placeholder 제외)
+                    const existingText = input.innerText.trim();
+                    const isPlaceholder = existingText === '' || 
+                                         existingText.includes('물어보기') ||
+                                         existingText.includes('Ask Gemini') ||
+                                         existingText.includes('이미지를 설명');
+                    
+                    if (isPlaceholder) {{
+                        // placeholder만 있으면 innerHTML로 직접 설정
+                        // <p> 태그로 감싸서 Gemini 입력 형식 준수
+                        input.innerHTML = '<p>' + {cleanPrompt}.replace(/\\n/g, '</p><p>') + '</p>';
+                    }} else {{
+                        // 기존 텍스트 뒤에 추가
+                        document.execCommand('insertText', false, '\\n' + {cleanPrompt});
+                    }}
+                    
+                    // React/Angular 상태 업데이트를 위한 이벤트 발생
+                    ['input', 'change', 'keyup'].forEach(evtName => {{
+                        input.dispatchEvent(new Event(evtName, {{ bubbles: true }}));
+                    }});
+                    
+                    // InputEvent도 발생 (일부 프레임워크 호환)
+                    input.dispatchEvent(new InputEvent('input', {{
+                        bubbles: true,
+                        cancelable: true,
+                        inputType: 'insertText',
+                        data: {cleanPrompt}
+                    }}));
+                    
+                    return 'text_inserted';
+                }})()";
+            
+            var insertResult = await _webView.CoreWebView2.ExecuteScriptAsync(insertScript);
+            Log($"텍스트 삽입 결과: {insertResult}");
+            
+            // 3. 잠시 대기 후 전송 버튼 활성화 확인
+            await Task.Delay(500);
+            
+            // 4. 전송 버튼 클릭 (활성화될 때까지 대기)
+            var sendScript = @"
+                (async function() {
+                    for (let i = 0; i < 20; i++) {
+                        const sendBtn = document.querySelector('.send-button:not(.stop)') ||
+                                       document.querySelector('button[aria-label=""보내기""]') ||
+                                       document.querySelector('button[aria-label=""Send message""]');
+                        
+                        if (sendBtn && !sendBtn.disabled && sendBtn.offsetParent !== null) {
+                            // 버튼이 활성화되면 클릭
+                            sendBtn.click();
+                            return 'sent';
+                        }
+                        await new Promise(r => setTimeout(r, 100));
+                    }
+                    return 'button_not_ready';
+                })()";
+            
+            var sendResult = await _webView.CoreWebView2.ExecuteScriptAsync(sendScript);
+            Log($"전송 결과: {sendResult}");
+            
+            return sendResult.Contains("sent");
         }
-        await Task.Delay(150); // DOM이 주입된 텍스트를 인식할 수 있는 최소 시간 부여
+        else
+        {
+            // 일반 모드: 기존 내용 초기화
+            await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.FocusAndClearScript);
+            await Task.Delay(80);
 
-        // 3. 엔진 전송 버튼 클릭 트리거
-        _webView?.CoreWebView2?.ExecuteScriptAsync(GeminiScripts.SendButtonScript);
-        await Task.Delay(100);
+            // 텍스트 데이터를 JS 호환 형식으로 이스케이프하여 주입 (execCommand 사용)
+            var cleanPrompt = EscapeJsString(prompt);
+            _scriptBuilder.Clear();
+            _scriptBuilder.Append(@"(function() {
+                const input = document.querySelector('.ql-editor') || 
+                              document.querySelector('div[contenteditable=""true""]');
+                if (!input) return false;
+                input.focus();
+                document.execCommand('insertText', false, ");
+            _scriptBuilder.Append(cleanPrompt);
+            _scriptBuilder.Append(@");
+                return true;
+            })();");
+            
+            if (_webView?.CoreWebView2 != null)
+            {
+                await _webView.CoreWebView2.ExecuteScriptAsync(_scriptBuilder.ToString());
+            }
+            await Task.Delay(150);
+
+            // 엔진 전송 버튼 클릭 트리거
+            _webView?.CoreWebView2?.ExecuteScriptAsync(GeminiScripts.SendButtonScript);
+            await Task.Delay(100);
+            return true;
+        }
     }
 
     /// <summary>
@@ -297,10 +522,11 @@ public class GeminiAutomation : IGeminiAutomation
     /// 모델의 답변 작성이 완료될 때까지 상태를 모니터링합니다.
     /// 답변 내용의 변화 유무와 시스템의 '생성 중' 플래그를 조합하여 완료 시점을 결정합니다.
     /// </summary>
-    /// <param name="minCount">이전 세션의 답변 개수 (이보다 증가해야 새로운 답변이 시작된 것으로 판단)</param>
+    /// <param name="timeoutSeconds">응답 대기 최대 시간 (초)</param>
     /// <returns>최종 완성된 답변 텍스트</returns>
-    private async Task<string> WaitForResponseAsync(int minCount)
+    public async Task<string> WaitForResponseAsync(int timeoutSeconds = 120)
     {
+        int minCount = await GetResponseCountAsync();
         var startTime = DateTime.Now;
         var lastChangeTime = DateTime.Now; // 내용에 변화가 있었던 마지막 시각
         string lastResponse = "";
@@ -797,7 +1023,7 @@ public class GeminiAutomation : IGeminiAutomation
     }
 
     /// <summary>
-    /// Gemini 응답 생성을 중지합니다. (IGeminiAutomation 인터페이스 구현)
+    /// Gemini 응답 생성을 중지합니다. (페이지 새로고침 방식)
     /// </summary>
     public async Task<bool> StopGeminiResponseAsync()
     {
@@ -805,10 +1031,25 @@ public class GeminiAutomation : IGeminiAutomation
         
         try
         {
-            Log("Gemini 응답 생성 중지 시도...");
+            Log("Gemini 응답 강제 중지 (페이지 새로고침)...");
+            
+            // 1. 먼저 중지 버튼 시도
             var result = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.StopGeminiResponseScript);
-            Log($"중지 결과: {result}");
-            return result != "\"no_stop_button_found\"";
+            if (result != "\"no_stop_button_found\"")
+            {
+                Log("중지 버튼으로 중지됨");
+                return true;
+            }
+            
+            // 2. 중지 버튼이 없으면 페이지 새로고침으로 강제 중단
+            Log("중지 버튼 없음, 페이지 새로고침으로 강제 중단...");
+            _webView.CoreWebView2.Navigate("https://gemini.google.com/app");
+            
+            // 페이지 로드 대기
+            await Task.Delay(2000);
+            
+            Log("페이지 새로고침 완료");
+            return true;
         }
         catch (Exception ex)
         {
@@ -909,7 +1150,166 @@ public class GeminiAutomation : IGeminiAutomation
     }
 
     /// <summary>
-    /// 이미지 파일 업로드 (WebView2 파일 입력 사용)
+    /// CDP(Chrome DevTools Protocol) DOM.setFileInputFiles를 사용하여 파일 업로드
+    /// 이 방식은 브라우저의 네이티브 파일 선택 메커니즘을 직접 사용하므로 가장 안정적입니다.
+    /// </summary>
+    private async Task<bool> UploadViaCdpAsync(string absoluteFilePath)
+    {
+        if (_webView.CoreWebView2 == null) return false;
+        
+        try
+        {
+            // Step 1: 먼저 기존의 file input 확인 (이미 DOM에 있을 수 있음)
+            var existingInputScript = @"
+                (function() {
+                    // 우선순위: name='Filedata' > accept에 image 포함 > 일반 file input
+                    const inputSelectors = [
+                        'input[type=""file""][name=""Filedata""]',
+                        'input[type=""file""][accept*=""image""]',
+                        'input[type=""file""]'
+                    ];
+                    for (const sel of inputSelectors) {
+                        const input = document.querySelector(sel);
+                        if (input) {
+                            if (!input.id) input.id = '__cdp_file_input_' + Date.now();
+                            return { found: true, id: input.id, selector: sel };
+                        }
+                    }
+                    return { found: false };
+                })()";
+            
+            var existingResult = await _webView.CoreWebView2.ExecuteScriptAsync(existingInputScript);
+            Log($"CDP: 기존 file input 확인 = {existingResult}");
+            
+            // Step 2: 기존 input이 없으면 메뉴를 열어 file input 생성 유도
+            // 주의: 서브메뉴 항목 클릭 시 네이티브 다이얼로그가 열리므로 메인 버튼만 클릭
+            if (existingResult.Contains("\"found\":false"))
+            {
+                var menuScript = @"
+                    (async function() {
+                        // 메인 업로드 버튼 클릭 (메뉴 열기)
+                        const mainBtnSelectors = [
+                            'button.upload-card-button',
+                            'button[aria-label*=""파일 업로드 메뉴""]',
+                            'button[aria-label*=""Open file upload""]',
+                            'button[aria-label*=""첨부""]',
+                            'button[aria-label*=""Attach""]'
+                        ];
+                        let mainBtn = null;
+                        for (const sel of mainBtnSelectors) {
+                            mainBtn = document.querySelector(sel);
+                            if (mainBtn && mainBtn.offsetParent !== null) break;
+                        }
+                        if (mainBtn) {
+                            mainBtn.click();
+                            await new Promise(r => setTimeout(r, 600));
+                            
+                            // 파일 업로드 서브메뉴 아이템 클릭 (네이티브 다이얼로그 열림 -> CDP에서 가로챔)
+                            const menuItemSelectors = [
+                                'button[aria-label*=""파일 업로드. 문서""]',
+                                'button[aria-label*=""Upload file""]',
+                                'button[aria-label*=""파일 업로드""]'
+                            ];
+                            for (const sel of menuItemSelectors) {
+                                const btn = document.querySelector(sel);
+                                if (btn && btn.offsetParent !== null) {
+                                    btn.click();
+                                    await new Promise(r => setTimeout(r, 300));
+                                    return 'menu_clicked';
+                                }
+                            }
+                        }
+                        return 'no_menu';
+                    })()";
+                
+                await _webView.CoreWebView2.ExecuteScriptAsync(menuScript);
+                await Task.Delay(500);
+                
+                // 다시 file input 확인
+                existingResult = await _webView.CoreWebView2.ExecuteScriptAsync(existingInputScript);
+                Log($"CDP: 메뉴 클릭 후 file input 확인 = {existingResult}");
+            }
+            
+            // Step 3: file input 요소의 backendNodeId 획득 (name="Filedata" 우선순위)
+            var getNodeScript = @"
+                (function() {
+                    // 우선순위: name='Filedata' > accept에 image 포함 > 일반 file input
+                    const inputSelectors = [
+                        'input[type=""file""][name=""Filedata""]',
+                        'input[type=""file""][accept*=""image""]',
+                        'input[type=""file""]'
+                    ];
+                    for (const sel of inputSelectors) {
+                        const input = document.querySelector(sel);
+                        if (input) {
+                            if (!input.id) input.id = '__cdp_file_input_' + Date.now();
+                            return input.id;
+                        }
+                    }
+                    return null;
+                })()";
+            
+            var inputIdResult = await _webView.CoreWebView2.ExecuteScriptAsync(getNodeScript);
+            var inputId = inputIdResult?.Trim('"');
+            
+            if (string.IsNullOrEmpty(inputId) || inputId == "null")
+            {
+                Log("CDP: file input 요소를 찾을 수 없음");
+                return false;
+            }
+            
+            Log($"CDP: file input ID = {inputId}");
+            
+            // Step 3: CDP로 DOM 문서 가져오기
+            await _webView.CoreWebView2.CallDevToolsProtocolMethodAsync("DOM.enable", "{}");
+            var docResult = await _webView.CoreWebView2.CallDevToolsProtocolMethodAsync("DOM.getDocument", "{}");
+            
+            // Step 4: querySelector로 노드 찾기
+            var querySelectorParams = $@"{{""nodeId"": 1, ""selector"": ""#{inputId}""}}";
+            var queryResult = await _webView.CoreWebView2.CallDevToolsProtocolMethodAsync("DOM.querySelector", querySelectorParams);
+            
+            // queryResult를 파싱하여 nodeId 추출
+            // JSON 형식: {"nodeId": 123}
+            var nodeIdMatch = System.Text.RegularExpressions.Regex.Match(queryResult, @"""nodeId""\s*:\s*(\d+)");
+            if (!nodeIdMatch.Success)
+            {
+                Log($"CDP: nodeId를 찾을 수 없음. 결과: {queryResult}");
+                return false;
+            }
+            
+            var nodeId = nodeIdMatch.Groups[1].Value;
+            Log($"CDP: nodeId = {nodeId}");
+            
+            // Step 5: DOM.setFileInputFiles로 파일 설정
+            // 경로의 백슬래시를 이스케이프 처리
+            var escapedPath = absoluteFilePath.Replace("\\", "\\\\");
+            var setFilesParams = $@"{{""nodeId"": {nodeId}, ""files"": [""{escapedPath}""]}}";
+            
+            await _webView.CoreWebView2.CallDevToolsProtocolMethodAsync("DOM.setFileInputFiles", setFilesParams);
+            Log("CDP: 파일 설정 완료");
+            
+            // Step 6: 업로드 확인 대기
+            await Task.Delay(500);
+            var checkScript = @"
+                (function() {
+                    const hasUpload = document.querySelector('img[src*=""blob:""], .attachment-thumbnail, content-container img, .upload-progress');
+                    return hasUpload ? 'uploaded' : 'pending';
+                })()";
+            
+            var checkResult = await _webView.CoreWebView2.ExecuteScriptAsync(checkScript);
+            Log($"CDP: 업로드 확인 결과 = {checkResult}");
+            
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log($"CDP 업로드 오류: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 이미지 파일 업로드 (CDP 파일 다이얼로그 > 클립보드 > 파일 input > 드래그앤드롭 순)
     /// </summary>
     public async Task<bool> UploadImageAsync(string imagePath)
     {
@@ -919,34 +1319,138 @@ public class GeminiAutomation : IGeminiAutomation
             return false;
         }
 
-        Log($"이미지 자동 업로드 주입 시작: {Path.GetFileName(imagePath)}");
+        // 절대 경로 변환 (CDP는 절대 경로 필요)
+        string absolutePath = Path.GetFullPath(imagePath);
+        Log($"이미지 업로드 시작: {Path.GetFileName(imagePath)}");
+        
         try
         {
-            // 1. 이미지를 Base64로 읽기
+            // ========================================
+            // 방법 1: CDP DOM.setFileInputFiles (가장 안정적, 1순위)
+            // ========================================
+            Log("CDP 파일 다이얼로그 방식 시도...");
+            if (await UploadViaCdpAsync(absolutePath))
+            {
+                Log("CDP 방식 성공!");
+                return true;
+            }
+            Log("CDP 방식 실패, 다른 방법 시도...");
+            
+            // 이미지를 Base64로 읽기 (다른 방법들에서 사용)
             byte[] imageBytes = await File.ReadAllBytesAsync(imagePath);
             string base64Image = Convert.ToBase64String(imageBytes);
             string extension = Path.GetExtension(imagePath).ToLower().Replace(".", "");
-            string mimeType = extension == "png" ? "image/png" : "image/jpeg";
+            string mimeType = extension switch
+            {
+                "png" => "image/png",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                "bmp" => "image/bmp",
+                _ => "image/jpeg"
+            };
             string filename = Path.GetFileName(imagePath);
 
-            // 2. 먼저 업로드 메뉴를 열어 파일 input을 DOM에 생성
-            var menuScript = @"
-                (async function() {
-                    // Step 1: 메인 업로드 버튼 클릭
+            // 방법 2: 클립보드 붙여넣기 (동기 방식으로 변경)
+            Log("클립보드 붙여넣기 방식 시도...");
+            var clipboardScript = $@"
+                (function() {{
+                    try {{
+                        const base64Data = '{base64Image}';
+                        const fileName = '{filename}';
+                        const mimeType = '{mimeType}';
+                        
+                        // Base64를 Blob으로 변환
+                        const bin = atob(base64Data);
+                        const buf = new Uint8Array(bin.length);
+                        for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+                        const blob = new Blob([buf], {{ type: mimeType }});
+                        
+                        // 입력창 찾기
+                        const inputSelectors = [
+                            'rich-textarea',
+                            '.ql-editor',
+                            '[contenteditable=""true""]',
+                            'textarea',
+                            '.input-area'
+                        ];
+                        
+                        let inputEl = null;
+                        for (const sel of inputSelectors) {{
+                            inputEl = document.querySelector(sel);
+                            if (inputEl) break;
+                        }}
+                        
+                        if (!inputEl) {{
+                            return 'no_input_element';
+                        }}
+                        
+                        // 입력창 포커스
+                        inputEl.focus();
+                        
+                        // ClipboardItem 생성 및 붙여넣기 이벤트 시뮬레이션
+                        const file = new File([blob], fileName, {{ type: mimeType }});
+                        const dataTransfer = new DataTransfer();
+                        dataTransfer.items.add(file);
+                        
+                        // paste 이벤트 생성 및 발송
+                        const pasteEvent = new ClipboardEvent('paste', {{
+                            bubbles: true,
+                            cancelable: true,
+                            clipboardData: dataTransfer
+                        }});
+                        
+                        inputEl.dispatchEvent(pasteEvent);
+                        return 'paste_dispatched';
+                    }} catch (e) {{
+                        return 'paste_error: ' + e.message;
+                    }}
+                }})()";
+
+            var clipboardResult = await _webView.CoreWebView2.ExecuteScriptAsync(clipboardScript);
+            Log($"클립보드 결과: {clipboardResult}");
+
+            if (clipboardResult.Contains("paste_dispatched"))
+            {
+                // 붙여넣기 이벤트 후 업로드 확인 대기
+                await Task.Delay(1000);
+                if (await CheckUploadSuccessAsync())
+                {
+                    Log("클립보드 방식 성공!");
+                    return true;
+                }
+            }
+
+            // 방법 3: 파일 input 직접 주입 (폴백)
+            Log("폴백: 파일 input 직접 주입 방식 시도...");
+            
+            // 먼저 업로드 메뉴를 열어 파일 input을 DOM에 생성 (동기 방식)
+            var menuClickScript = @"
+                (function() {
                     const mainBtnSelectors = [
-                        'button[aria-label*=""파일 업로드 메뉴""]',
                         'button.upload-card-button',
-                        'button[aria-label*=""Open file upload""]'
+                        'button[aria-label*=""파일 업로드 메뉴""]',
+                        'button[aria-label*=""Open file upload""]',
+                        'button[aria-label*=""첨부""]',
+                        'button[aria-label*=""Attach""]'
                     ];
                     let mainBtn = null;
                     for (const sel of mainBtnSelectors) {
                         mainBtn = document.querySelector(sel);
                         if (mainBtn && mainBtn.offsetParent !== null) break;
                     }
-                    if (mainBtn) mainBtn.click();
-                    await new Promise(r => setTimeout(r, 500));
-                    
-                    // Step 2: 파일 업로드 메뉴 항목 클릭
+                    if (mainBtn) {
+                        mainBtn.click();
+                        return 'main_clicked';
+                    }
+                    return 'no_main_btn';
+                })()";
+            
+            await _webView.CoreWebView2.ExecuteScriptAsync(menuClickScript);
+            await Task.Delay(600);
+            
+            // 서브메뉴 클릭
+            var subMenuScript = @"
+                (function() {
                     const menuItemSelectors = [
                         'button[aria-label*=""파일 업로드. 문서""]',
                         'button[aria-label*=""Upload file""]',
@@ -956,20 +1460,18 @@ public class GeminiAutomation : IGeminiAutomation
                         const btn = document.querySelector(sel);
                         if (btn && btn.offsetParent !== null) {
                             btn.click();
-                            await new Promise(r => setTimeout(r, 300));
-                            return 'menu_ok';
+                            return 'submenu_clicked';
                         }
                     }
-                    return 'menu_fail';
+                    return 'no_submenu';
                 })()";
             
-            var menuResult = await _webView.CoreWebView2.ExecuteScriptAsync(menuScript);
-            Log($"업로드 메뉴 결과: {menuResult}");
+            await _webView.CoreWebView2.ExecuteScriptAsync(subMenuScript);
             await Task.Delay(500);
 
-            // 3. DataTransfer를 이용한 파일 주입 스크립트
+            // 파일 input에 직접 파일 주입 (동기 방식)
             var injectScript = $@"
-                (async function() {{
+                (function() {{
                     try {{
                         const base64Data = '{base64Image}';
                         const fileName = '{filename}';
@@ -980,35 +1482,52 @@ public class GeminiAutomation : IGeminiAutomation
                         for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
                         const file = new File([buf], fileName, {{ type: mimeType }});
 
-                        // input[type=file][name=Filedata] 탐색 (Gemini 특유의 속성)
-                        let input = document.querySelector('input[type=""file""][name=""Filedata""]');
+                        // 우선순위: name='Filedata' > accept에 image 포함 > 일반 file input
+                        const inputSelectors = [
+                            'input[type=""file""][name=""Filedata""]',
+                            'input[type=""file""][accept*=""image""]',
+                            'input[type=""file""]'
+                        ];
+                        let input = null;
+                        for (const sel of inputSelectors) {{
+                            input = document.querySelector(sel);
+                            if (input) break;
+                        }}
                         if (!input) {{
-                            input = document.querySelector('input[type=""file""]');
+                            return 'no_file_input';
                         }}
-
-                        if (input) {{
-                            const dataTransfer = new DataTransfer();
-                            dataTransfer.items.add(file);
-                            input.files = dataTransfer.files;
-                            input.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                            return 'success';
-                        }}
-                        return 'input_not_found';
+                        
+                        const dataTransfer = new DataTransfer();
+                        dataTransfer.items.add(file);
+                        input.files = dataTransfer.files;
+                        
+                        // 다양한 이벤트 발생
+                        input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        
+                        return 'input_injected';
                     }} catch (e) {{
-                        return 'error: ' + e.message;
+                        return 'inject_error: ' + e.message;
                     }}
                 }})()";
 
-            var result = await _webView.CoreWebView2.ExecuteScriptAsync(injectScript);
-            Log($"업로드 주입 결과: {result}");
+            var injectResult = await _webView.CoreWebView2.ExecuteScriptAsync(injectScript);
+            Log($"파일 input 주입 결과: {injectResult}");
 
-            if (result.Contains("success")) return true;
+            if (injectResult.Contains("input_injected"))
+            {
+                await Task.Delay(1000);
+                if (await CheckUploadSuccessAsync())
+                {
+                    Log("파일 input 주입 성공!");
+                    return true;
+                }
+            }
 
-            // 폴백: 드래그앤드롭 시뮬레이션 시도
-            Log("폴백: 드래그앤드롭 방식 시도...");
+            // 방법 4: drop 이벤트 (마지막 폴백)
+            Log("최종 폴백: drop 이벤트 시도...");
             var dropScript = $@"
-                (async function() {{
+                (function() {{
                     try {{
                         const base64Data = '{base64Image}';
                         const fileName = '{filename}';
@@ -1019,32 +1538,97 @@ public class GeminiAutomation : IGeminiAutomation
                         for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
                         const file = new File([buf], fileName, {{ type: mimeType }});
 
-                        const dropZone = document.querySelector('.xap-uploader-dropzone') || document.body;
+                        // 드롭존 또는 입력 영역 찾기
+                        const dropTargets = [
+                            '.xap-uploader-dropzone',
+                            'rich-textarea',
+                            '.input-area-wrapper',
+                            '.chat-window',
+                            'main'
+                        ];
+                        
+                        let dropZone = null;
+                        for (const sel of dropTargets) {{
+                            dropZone = document.querySelector(sel);
+                            if (dropZone) break;
+                        }}
+                        
+                        if (!dropZone) dropZone = document.body;
+                        
                         const dataTransfer = new DataTransfer();
                         dataTransfer.items.add(file);
                         
-                        const dropEvent = new DragEvent('drop', {{
-                            bubbles: true,
-                            cancelable: true,
-                            dataTransfer: dataTransfer
-                        }});
-                        dropZone.dispatchEvent(dropEvent);
-                        return 'drop_attempted';
+                        // dragenter -> dragover -> drop 시퀀스
+                        dropZone.dispatchEvent(new DragEvent('dragenter', {{ bubbles: true, dataTransfer: dataTransfer }}));
+                        dropZone.dispatchEvent(new DragEvent('dragover', {{ bubbles: true, dataTransfer: dataTransfer }}));
+                        dropZone.dispatchEvent(new DragEvent('drop', {{ bubbles: true, cancelable: true, dataTransfer: dataTransfer }}));
+                        
+                        return 'drop_dispatched';
                     }} catch (e) {{
                         return 'drop_error: ' + e.message;
                     }}
                 }})()";
             
             var dropResult = await _webView.CoreWebView2.ExecuteScriptAsync(dropScript);
-            Log($"드래그앤드롭 결과: {dropResult}");
+            Log($"Drop 결과: {dropResult}");
             
-            return dropResult.Contains("drop_attempted");
+            if (dropResult.Contains("drop_dispatched"))
+            {
+                await Task.Delay(1000);
+                if (await CheckUploadSuccessAsync())
+                {
+                    Log("Drop 방식 성공!");
+                    return true;
+                }
+            }
+            
+            Log("모든 업로드 방법 실패");
+            return false;
         }
         catch (Exception ex)
         {
             Log($"이미지 업로드 중 시스템 오류: {ex.Message}");
             return false;
         }
+    }
+    
+    /// <summary>
+    /// 업로드 성공 여부를 확인하는 헬퍼 메서드
+    /// </summary>
+    private async Task<bool> CheckUploadSuccessAsync()
+    {
+        if (_webView.CoreWebView2 == null) return false;
+        
+        var checkScript = @"
+            (function() {
+                const selectors = [
+                    ""img[src^='blob:']"",
+                    '.input-area-container img',
+                    '.rich-textarea img',
+                    '.ql-editor img',
+                    '.file-chip',
+                    '.attachment-chip',
+                    '.attachment-thumbnail',
+                    'content-container img',
+                    '[data-filename]',
+                    '.upload-progress',
+                    '.attached-content',
+                    '.input-attachments'
+                ];
+                
+                for (const sel of selectors) {
+                    try {
+                        const els = document.querySelectorAll(sel);
+                        if (els.length > 0) {
+                            return 'found:' + sel;
+                        }
+                    } catch (e) {}
+                }
+                return 'not_found';
+            })()";
+        
+        var result = await _webView.CoreWebView2.ExecuteScriptAsync(checkScript);
+        return result != null && result.Contains("found:");
     }
 
     /// <summary>
@@ -1206,11 +1790,11 @@ public class GeminiAutomation : IGeminiAutomation
     }
     
     /// <summary> 명시적으로 메시지를 전송합니다. </summary>
-    async Task<bool> IGeminiAutomation.SendMessageAsync(string message)
+    async Task<bool> IGeminiAutomation.SendMessageAsync(string message, bool preserveAttachment)
     {
         try
         {
-            await SendMessageAsync(message);
+            await SendMessageAsync(message, preserveAttachment);
             return true;
         }
         catch { return false; }
@@ -1292,27 +1876,114 @@ public class GeminiAutomation : IGeminiAutomation
         {
             try
             {
+                // 다양한 선택자로 업로드된 이미지/파일 확인 (JavaScript 코드와 동일)
                 var result = await _webView.CoreWebView2.ExecuteScriptAsync(@"
                     (function() {
-                        const attachments = document.querySelectorAll(
-                            ""img[src*='blob:'], .attachment-thumbnail, content-container img""
-                        );
-                        return attachments.length > 0 ? 'true' : 'false';
+                        // 다양한 선택자 배열
+                        const selectors = [
+                            // Blob URL 이미지 (가장 일반적)
+                            ""img[src^='blob:']"",
+                            // 입력창 영역의 업로드된 첨부 파일
+                            '.input-area-container img',
+                            '.rich-textarea img',
+                            '.ql-editor img',
+                            // 파일 첨부 영역
+                            '.file-chip',
+                            '.attachment-chip',
+                            '.attachment-thumbnail',
+                            'content-container .attachment-thumbnail',
+                            'content-container img',
+                            // 파일 이름 표시 칩
+                            '[data-filename]',
+                            '.uploaded-file-name',
+                            // 업로드 진행 상태
+                            '.upload-progress',
+                            // 삭제 버튼이 있는 첨부 영역
+                            'button[aria-label*=""삭제""]',
+                            'button[aria-label*=""Remove""]',
+                            'button[aria-label*=""Delete""]',
+                            // 첨부 컨테이너
+                            '.attached-content',
+                            '.input-attachments'
+                        ];
+                        
+                        for (const sel of selectors) {
+                            try {
+                                const els = document.querySelectorAll(sel);
+                                if (els.length > 0) {
+                                    return 'found:' + sel;
+                                }
+                            } catch (e) {}
+                        }
+                        return 'not_found';
                     })()
                 ");
                 
-                if (result == "true") return true;
+                if (result != null && result.Contains("found:"))
+                {
+                    Log($"업로드 확인됨: {result.Trim('\"')}");
+                    return true;
+                }
             }
             catch { }
             
             await Task.Delay(500);
         }
         
+        Log("업로드 대기 시간 초과");
         return false;
     }
     
-    /// <summary> 고급 AI 모델(Pro) 모드로 환경을 구성합니다. </summary>
-    public async Task<bool> SelectProModeAsync() => await SelectModelAsync("pro");
+    /// <summary> 고급 AI 모델(Pro) 모드로 환경을 구성합니다. 최대 3회 재시도. </summary>
+    public async Task<bool> SelectProModeAsync()
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            // 현재 모델 확인
+            var currentModel = await GetCurrentModelAsync();
+            if (currentModel.Contains("pro"))
+            {
+                Log("이미 Pro 모드입니다.");
+                return true;
+            }
+            
+            // Pro 모드 전환 시도
+            var switched = await SelectModelAsync("pro");
+            if (switched)
+            {
+                await Task.Delay(500);
+                // 전환 확인
+                currentModel = await GetCurrentModelAsync();
+                if (currentModel.Contains("pro"))
+                {
+                    Log("Pro 모드로 전환 완료.");
+                    return true;
+                }
+            }
+            
+            Log($"Pro 모드 전환 재시도 ({attempt + 1}/3)...");
+            await Task.Delay(1000);
+        }
+        
+        Log("Pro 모드 전환 실패.");
+        return false;
+    }
+    
+    /// <summary> 현재 선택된 모델을 확인합니다 (flash/pro/unknown). </summary>
+    public async Task<string> GetCurrentModelAsync()
+    {
+        if (_webView.CoreWebView2 == null) return "unknown";
+        
+        try
+        {
+            var result = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.GetCurrentModelScript);
+            return result?.Trim('"') ?? "unknown";
+        }
+        catch
+        {
+            return "unknown";
+        }
+    }
 
     /// <summary> 지정된 물리 모델로 환경을 전환합니다. </summary>
     public async Task<bool> SelectModelAsync(string modelName)

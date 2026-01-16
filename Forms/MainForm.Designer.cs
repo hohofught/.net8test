@@ -44,50 +44,26 @@ public partial class MainForm
     {
         try
         {
-            // 1. [핵심] WebView 모드 백그라운드 자동 시작
-            BtnModeWebView_Click(null, EventArgs.Empty);
-
-            // [추가 요청] 프로그램 시작 시 WebView 창을 자동으로 열었다가 1초 뒤에 닫음
-            _ = Task.Run(async () => {
-                await Task.Delay(500); 
-                if (!IsHandleCreated || IsDisposed) return;
-                
-                this.Invoke((MethodInvoker)delegate {
-                    try
-                    {
-                        var browser = ShowBrowserWindow();
-                        if (browser != null)
-                        {
-                            browser.Size = new Size(10, 10);
-                            browser.StartPosition = FormStartPosition.Manual;
-                            browser.Location = new Point(0, 0);
-                            browser.Opacity = 0.01; 
-                            
-                            EventHandler<CoreWebView2NavigationCompletedEventArgs> handler = null!;
-                            handler = (s, args) => {
-                                if (args.IsSuccess) {
-                                    this.Invoke((MethodInvoker)(() => {
-                                        if (!browser.IsDisposed && browser.Visible) browser.Close();
-                                    }));
-                                    webView.NavigationCompleted -= handler;
-                                }
-                            };
-                            webView.NavigationCompleted += handler;
-
-                            Task.Delay(15000).ContinueWith(t => {
-                                try {
-                                    this.Invoke((MethodInvoker)(() => {
-                                        if (browser != null && !browser.IsDisposed && browser.Visible) 
-                                            browser.Close();
-                                        webView.NavigationCompleted -= handler;
-                                    }));
-                                } catch { }
-                            });
-                        }
-                    }
-                    catch { }
-                });
-            });
+            // WebView 모드를 기본으로 활성화 (설정 창은 열지 않음)
+            useWebView2Mode = true;
+            UpdateModeButtonsUI(btnModeWebView);
+            if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
+            
+            // WebView2 백그라운드 초기화
+            if (webView == null || webView.CoreWebView2 == null)
+            {
+                InitializeWebView2Async();
+            }
+            
+            // 현재 모드 버튼 텍스트 업데이트
+            var manager = Services.SharedWebViewManager.Instance;
+            var modeText = manager.UseLoginMode ? "로그인" : "비로그인";
+            if (btnModeWebView != null)
+            {
+                btnModeWebView.Text = $"WebView ({modeText})";
+            }
+            
+            UpdateStatus("준비 완료", Color.Green);
         }
         catch (Exception ex)
         {
@@ -121,17 +97,12 @@ public partial class MainForm
 
         pnlStatusHttp = CreateStatusDot();
         lblStatusHttp = CreateStatusLabel("HTTP");
-        pnlStatusBrowser = CreateStatusDot();
-        lblStatusBrowser = CreateStatusLabel("Browser");
         pnlStatusWebView = CreateStatusDot();
         lblStatusWebView = CreateStatusLabel("WebView");
 
         // cmbGeminiModel Removed (Defaulting to Pro internally)
 
-        btnModeBrowser = CreateStyledButton("브라우저 모드", UiTheme.ColorSurfaceLight);
-        btnModeBrowser.Click += BtnModeBrowser_Click;
-
-        btnModeWebView = CreateStyledButton("WebView 모드", UiTheme.ColorSurfaceLight);
+        btnModeWebView = CreateStyledButton("WebView 로그인", UiTheme.ColorSurfaceLight);
         btnModeWebView.Click += BtnModeWebView_Click;
         
         chkHttpMode = new CheckBox { Text = "HTTP", AutoSize = true, Margin = new Padding(0, 8, 10, 0), Font = UiTheme.FontRunway };
@@ -152,11 +123,10 @@ public partial class MainForm
 
         rightControls.Controls.AddRange(new Control[] {
             pnlStatusHttp, lblStatusHttp,
-            pnlStatusBrowser, lblStatusBrowser,
             pnlStatusWebView, lblStatusWebView,
             // cmbGeminiModel Removed
             chkHttpMode, btnModeHttp,
-            btnModeBrowser, btnModeWebView,
+            btnModeWebView,
             btnThemeToggle,
             btnDebug
         });
@@ -180,7 +150,7 @@ public partial class MainForm
         if (txtInput != null) UiTheme.StyleRichTextBox(txtOutput); // Ensure RichTextBox gets correct colors
         
         // Update mode buttons highlight
-        UpdateModeButtonsUI(useWebView2Mode ? btnModeWebView : (useBrowserMode ? btnModeBrowser : (chkHttpMode.Checked ? btnModeHttp : null)));
+        UpdateModeButtonsUI(useWebView2Mode ? btnModeWebView : (chkHttpMode.Checked ? btnModeHttp : null));
     }
 
     private void CreateMainWorkspace(Control parent)
@@ -232,15 +202,12 @@ public partial class MainForm
     {
         var leftFlow = new FlowLayoutPanel { Dock = DockStyle.Left, AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
         
-        btnLoadFile = CreateStyledButton("📂 파일 열기", UiTheme.ColorSurfaceLight);
-        btnLoadFile.Click += BtnLoadFile_Click;
-        
-        btnSaveFile = CreateStyledButton("💾 저장", UiTheme.ColorSurfaceLight);
-        btnSaveFile.Enabled = false;
-        btnSaveFile.Click += BtnSaveFile_Click;
+        // 파일 모드 버튼 (구 설정 버튼)
+        btnSettings = CreateStyledButton("📁 파일 모드", UiTheme.ColorSurfaceLight);
+        btnSettings.Click += BtnSettings_Click;
         
         btnClear = CreateStyledButton("🧹 초기화", UiTheme.ColorSurfaceLight);
-        btnClear.Click += (s, e) => { txtInput.Clear(); txtOutput.Clear(); if (isFileMode) BtnLoadFile_Click(null, EventArgs.Empty); httpClient?.ResetSession(); UpdateStatus("초기화됨", UiTheme.ColorWarning); };
+        btnClear.Click += BtnClear_Click;
 
         var sep1 = new Label { Text = "|", AutoSize = true, Margin = new Padding(10, 12, 10, 0), ForeColor = UiTheme.ColorBorder };
         
@@ -248,7 +215,7 @@ public partial class MainForm
         btnNanoBanana.ForeColor = Color.FromArgb(200, 160, 255);
         btnNanoBanana.Click += BtnNanoBanana_Click;
 
-        leftFlow.Controls.AddRange(new Control[] { btnLoadFile, btnSaveFile, btnClear, sep1, btnNanoBanana });
+        leftFlow.Controls.AddRange(new Control[] { btnSettings, btnClear, sep1, btnNanoBanana });
 
         var centerFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, Padding = new Padding(15, 0, 0, 0) };
         
@@ -277,14 +244,8 @@ public partial class MainForm
         centerFlow.Controls.Add(CreateComboGroup("언어", cmbTargetLang));
         centerFlow.Controls.Add(CreateComboGroup("스타일", cmbStyle));
         
-        // 통합 설정 버튼
-        btnSettings = new Button { Text = "⚙️ 설정", Width = 80, Height = 28, FlatStyle = FlatStyle.Flat, BackColor = UiTheme.ColorSurfaceLight, Margin = new Padding(10, 17, 5, 0) };
-        btnSettings.Click += BtnSettings_Click;
-        UiTheme.ApplyTheme(btnSettings);
-        
-        lblSettingsStatus = new Label { Text = "", AutoSize = true, Margin = new Padding(0, 21, 10, 0), ForeColor = UiTheme.ColorTextMuted };
-        
-        centerFlow.Controls.Add(btnSettings);
+        // 설정 상태 표시
+        lblSettingsStatus = new Label { Text = "", AutoSize = true, Margin = new Padding(10, 21, 10, 0), ForeColor = UiTheme.ColorTextMuted };
         centerFlow.Controls.Add(lblSettingsStatus);
 
         var rightFlow = new FlowLayoutPanel { Dock = DockStyle.Right, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, WrapContents = false };
@@ -352,11 +313,7 @@ public partial class MainForm
             // Gemini 응답 생성도 함께 중지
             try
             {
-                if (useBrowserMode && browserAutomation != null)
-                {
-                    _ = browserAutomation.StopGeminiResponseAsync();
-                }
-                else if (useWebView2Mode && automation != null)
+                if (useWebView2Mode && automation != null)
                 {
                     _ = automation.StopGeminiResponseAsync();
                 }

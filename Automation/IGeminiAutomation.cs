@@ -45,7 +45,9 @@ public interface IGeminiAutomation
     #region 메시지 전송/응답
     
     /// <summary>메시지 전송</summary>
-    Task<bool> SendMessageAsync(string message);
+    /// <param name="message">전송할 메시지</param>
+    /// <param name="preserveAttachment">true이면 이미지 첨부를 유지합니다</param>
+    Task<bool> SendMessageAsync(string message, bool preserveAttachment = false);
     
     /// <summary>응답 대기</summary>
     Task<string> WaitForResponseAsync(int timeoutSeconds = 120);

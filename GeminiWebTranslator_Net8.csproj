@@ -12,9 +12,9 @@
 
   <ItemGroup>
     <PackageReference Include="Emgu.CV" Version="4.8.1.5350" />
-    <PackageReference Include="PuppeteerSharp" Version="20.2.5" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="*" />
+    <PackageReference Include="PuppeteerSharp" Version="20.2.5" />
   </ItemGroup>
 
   <ItemGroup>
@@ -41,11 +41,6 @@
       <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
     </Content>
     <Content Include="Resources\Scripts\GeminiCommon.js">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
-    </Content>
-    <Content Include="Resources\Scripts\BrowserModeAutomation.js">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
