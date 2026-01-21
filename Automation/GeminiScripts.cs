@@ -704,6 +704,128 @@ namespace GeminiWebTranslator.Automation
 
         #endregion
 
+        #region 모델 감지
+
+        /// <summary>
+        /// 현재 사용 중인 Gemini 모델을 감지하는 스크립트
+        /// 비로그인/로그인 상태에서 빠른모드(Flash), 사고모드, Pro 등을 구분
+        /// 2026-01 브라우저 분석 기반:
+        ///   - 비로그인 빠른 모드 = gemini-2.5-flash (헤더: 9ec249fc9ad08861)
+        ///   - 로그인 빠른 모드 = gemini-3.0-flash (헤더: 56fdd199312815e2)
+        ///   - Pro/사고 모드 = gemini-3.0-pro 계열 (로그인 필요)
+        /// </summary>
+        public const string GetCurrentModelScript = @"
+            (function() {
+                const result = {
+                    modelName: 'unknown',
+                    modelVersion: '',
+                    isLoggedIn: false,
+                    detectionMethod: '',
+                    rawText: '',
+                    modeName: ''
+                };
+                
+                try {
+                    // 1. 로그인 상태 확인 (프로필 아이콘 또는 로그인 버튼)
+                    const loginBtn = document.querySelector('button[aria-label*=""로그인""], button[aria-label*=""Sign in""]');
+                    const loginLink = document.querySelector('a[aria-label*=""로그인""], a[aria-label*=""Sign in""]');
+                    const profileBtn = document.querySelector('a[aria-label*=""Google 계정""], a[aria-label*=""Google Account""]');
+                    result.isLoggedIn = !!profileBtn || !((loginBtn && loginBtn.offsetParent !== null) || (loginLink && loginLink.offsetParent !== null));
+                    
+                    // 2. 페이지 스크립트에서 헤더 ID로 실제 모델 감지 (가장 정확)
+                    const scripts = document.querySelectorAll('script:not([src])');
+                    const knownHeaders = {
+                        '56fdd199312815e2': { name: 'gemini-3.0-flash', version: '3.0', type: 'flash' },
+                        '9ec249fc9ad08861': { name: 'gemini-2.5-flash', version: '2.5', type: 'flash' },
+                        'e6fa609c3fa255c0': { name: 'gemini-3.0-pro', version: '3.0', type: 'pro' },
+                        'e051ce1aa80aa576': { name: 'gemini-3.0-pro-thinking', version: '3.0', type: 'thinking' }
+                    };
+                    
+                    let bestMatch = null;
+                    scripts.forEach(s => {
+                        const text = s.textContent || '';
+                        for (const [id, info] of Object.entries(knownHeaders)) {
+                            if (text.includes(id)) {
+                                // 3.0 Flash 우선 (로그인 상태에서 발견되면)
+                                if (id === '56fdd199312815e2') {
+                                    bestMatch = info;
+                                    break;
+                                }
+                                // 그 외 모델
+                                if (!bestMatch || info.version > bestMatch.version) {
+                                    bestMatch = info;
+                                }
+                            }
+                        }
+                    });
+                    
+                    if (bestMatch) {
+                        result.modelName = bestMatch.name;
+                        result.modelVersion = bestMatch.version;
+                        result.detectionMethod = 'header-id';
+                    }
+                    
+                    // 3. 모드 선택 버튼에서 현재 모드 확인 (UI 표시용)
+                    const modeButton = document.querySelector('button.input-area-switch');
+                    if (modeButton) {
+                        const modeText = (modeButton.innerText || '').trim();
+                        result.rawText = modeText;
+                        
+                        const modeLower = modeText.toLowerCase();
+                        if (modeLower.includes('빠른') || modeLower.includes('fast')) {
+                            result.modeName = '빠른 모드';
+                            // 헤더 ID로 감지 못했으면 로그인 상태 기반 추론
+                            if (result.modelName === 'unknown') {
+                                if (result.isLoggedIn) {
+                                    result.modelName = 'gemini-3.0-flash';
+                                    result.modelVersion = '3.0';
+                                } else {
+                                    result.modelName = 'gemini-2.5-flash';
+                                    result.modelVersion = '2.5';
+                                }
+                                result.detectionMethod = 'mode-button-login-check';
+                            }
+                        } else if (modeLower.includes('사고') || modeLower.includes('thinking')) {
+                            result.modeName = '사고 모드';
+                            if (result.modelName === 'unknown') {
+                                result.modelName = 'gemini-3.0-pro-thinking';
+                                result.modelVersion = '3.0';
+                                result.detectionMethod = 'mode-button-thinking';
+                            }
+                        } else if (modeLower.includes('pro')) {
+                            result.modeName = 'Pro';
+                            if (result.modelName === 'unknown') {
+                                result.modelName = 'gemini-3.0-pro';
+                                result.modelVersion = '3.0';
+                                result.detectionMethod = 'mode-button-pro';
+                            }
+                        }
+                    }
+                    
+                    // 4. 기본 모델 (fallback)
+                    if (result.modelName === 'unknown') {
+                        if (result.isLoggedIn) {
+                            result.modelName = 'gemini-3.0-flash';
+                            result.modelVersion = '3.0';
+                        } else {
+                            result.modelName = 'gemini-2.5-flash';
+                            result.modelVersion = '2.5';
+                        }
+                        result.modeName = '빠른 모드';
+                        result.detectionMethod = 'default-by-login';
+                    }
+                    
+                } catch (e) {
+                    result.modelName = 'error';
+                    result.rawText = e.message;
+                }
+                
+                return JSON.stringify(result);
+            })()
+        ";
+
+        #endregion
+
         #region 이미지 기능 진단
 
         /// <summary>
@@ -874,9 +996,9 @@ namespace GeminiWebTranslator.Automation
         #region 모델 선택
 
         /// <summary>
-        /// 현재 선택된 모델 확인 (flash/pro/unknown)
+        /// 현재 선택된 모델 타입 간단 확인 (flash/pro/unknown)
         /// </summary>
-        public const string GetCurrentModelScript = @"
+        public const string GetCurrentModelTypeScript = @"
             (function() {
                 const modeBtn = document.querySelector('button.input-area-switch') ||
                                document.querySelector('button[aria-haspopup=""true""][aria-label*=""모델""]') ||

@@ -156,22 +156,23 @@ public partial class MainForm : Form
 
         // 🚀 윈도우 로드 시 레이아웃 수동 보정 (WinForms 디자인 한계 극복용)
         this.Load += (s, e) => {
-            // 상단 설정 영역과 하단 메인 영역의 비율 조정
-            foreach (Control c in this.Controls) {
-                if (c is SplitContainer outer) {
-                    try { outer.SplitterDistance = 110; } catch { } 
-
-                    // 입력창과 출력창/로그창의 좌우 비율 조정
-                    foreach (Control c2 in outer.Panel2.Controls) {
-                        if (c2 is SplitContainer inner) {
-                            // 오른쪽 420px(로그창 등) 공간 확보
-                            try { inner.SplitterDistance = Math.Max(100, inner.Width - 420); } catch { }
-                            break;
+            // 모든 컨트롤에서 SplitContainer를 찾아 비율 조정
+            void AdjustSplitters(Control parent, int depth = 0) {
+                foreach (Control c in parent.Controls) {
+                    if (c is SplitContainer split) {
+                        if (split.Orientation == Orientation.Horizontal) {
+                            // 상단/하단 분할 (헤더/본문)
+                            try { split.SplitterDistance = 110; } catch { }
+                        }
+                        else if (split.Orientation == Orientation.Vertical && depth > 0) {
+                            // 입력/출력 좌우 분할 - 입력을 60%로 설정 (출력 40%)
+                            try { split.SplitterDistance = (int)(split.Width * 0.60); } catch { }
                         }
                     }
-                    break;
+                    AdjustSplitters(c, depth + 1);
                 }
             }
+            AdjustSplitters(this);
         };
 
         // 모델 선택 시(Flash/Pro) 즉시 반영
@@ -248,7 +249,15 @@ public partial class MainForm : Form
 
                 switch (diag.Status)
                 {
-                    case WebViewStatus.Ready: msg = $"WebView ({loginModeText}/준비됨)"; col = UiTheme.ColorSuccess; break;
+                    case WebViewStatus.Ready:
+                        // 모델 정보 가져오기
+                        var modelInfo = await automation.GetCurrentModelAsync();
+                        var modelDisplay = !string.IsNullOrEmpty(modelInfo.ModelVersion) 
+                            ? $"Gemini {modelInfo.ModelVersion}" 
+                            : "Gemini";
+                        msg = $"WebView ({loginModeText}/{modelDisplay})"; 
+                        col = UiTheme.ColorSuccess; 
+                        break;
                     case WebViewStatus.Generating: msg = $"WebView ({loginModeText}/생성중)"; col = UiTheme.ColorWarning; break;
                     case WebViewStatus.Loading: msg = $"WebView ({loginModeText}/로딩중)"; col = UiTheme.ColorPrimary; break;
                     case WebViewStatus.WrongPage: msg = "WebView (페이지이동필요)"; col = UiTheme.ColorWarning; break;
@@ -537,6 +546,65 @@ public partial class MainForm : Form
                          {
                              automation = new GeminiAutomation(webView);
                              automation.OnLog += msg => AppendLog(msg);
+                             
+                             // 스트리밍 콜백 연결 - 실시간 번역 결과 표시
+                             automation.OnStreamingUpdate += partial =>
+                             {
+                                 if (txtOutput == null || txtOutput.IsDisposed) return;
+                                 
+                                 if (txtOutput.InvokeRequired)
+                                 {
+                                     txtOutput.BeginInvoke(() =>
+                                     {
+                                         txtOutput.Text = partial;
+                                         txtOutput.SelectionStart = txtOutput.TextLength;
+                                         txtOutput.ScrollToCaret();
+                                     });
+                                 }
+                                 else
+                                 {
+                                     txtOutput.Text = partial;
+                                     txtOutput.SelectionStart = txtOutput.TextLength;
+                                     txtOutput.ScrollToCaret();
+                                 }
+                             };
+                             
+                             // 모델 감지 콜백 연결 - 실시간 모델 정보 GUI 업데이트
+                             automation.OnModelDetected += modelInfo =>
+                             {
+                                 if (this.IsDisposed) return;
+                                 
+                                 var action = () =>
+                                 {
+                                     // 상태바 업데이트
+                                     var headerStatus = modelInfo.DetectionMethod == "header-id" 
+                                         ? "✓" : "?";
+                                     var displayText = $"[{headerStatus}] {modelInfo.ModelName} v{modelInfo.ModelVersion}";
+                                     
+                                     AppendLog($"[Model] 감지됨: {modelInfo.ModelName} (v{modelInfo.ModelVersion}) " +
+                                         $"[{modelInfo.DetectionMethod}] " +
+                                         $"Login={modelInfo.IsLoggedIn}");
+                                     
+                                     // 2.5 모델 경고
+                                     if (modelInfo.ModelVersion == "2.5")
+                                     {
+                                         AppendLog($"[Model] ⚠️ {modelInfo.ModelName}은 현재 Google에서 비활성 상태입니다.");
+                                     }
+                                     
+                                     // 모드 버튼 텍스트 업데이트
+                                     if (btnModeWebView != null && !btnModeWebView.IsDisposed)
+                                     {
+                                         var modeText = modelInfo.IsLoggedIn ? "로그인" : "비로그인";
+                                         btnModeWebView.Text = $"WebView ({modeText} v{modelInfo.ModelVersion})";
+                                     }
+                                 };
+                                 
+                                 if (this.InvokeRequired)
+                                     this.BeginInvoke(action);
+                                 else
+                                     action();
+                             };
+                             
                              imageProcessor = new GeminiImageProcessor(webView);
                              imageProcessor.OnLog += msg => AppendLog(msg);
                          }
@@ -592,6 +660,66 @@ public partial class MainForm : Form
     public async Task ReconnectHttpApiAsync()
     {
         await InitializeHttpApiAsync();
+    }
+    
+    /// <summary>
+    /// MainForm WebView에서 쿠키를 추출합니다. (HTTP 설정에서 사용)
+    /// </summary>
+    /// <returns>PSID, PSIDTS, UserAgent 튜플</returns>
+    public async Task<(string? psid, string? psidts, string? userAgent)> ExtractCookiesFromWebViewAsync()
+    {
+        if (webView?.CoreWebView2 == null)
+        {
+            AppendLog("[쿠키추출] WebView가 초기화되지 않았습니다.");
+            return (null, null, null);
+        }
+        
+        try
+        {
+            AppendLog("[쿠키추출] MainForm WebView에서 쿠키 추출 중...");
+            
+            var cookieManager = webView.CoreWebView2.CookieManager;
+            var cookies = await cookieManager.GetCookiesAsync("https://gemini.google.com");
+            
+            AppendLog($"[쿠키추출] gemini.google.com에서 쿠키 {cookies.Count}개 발견");
+            
+            string? psid = null;
+            string? psidts = null;
+            
+            foreach (var cookie in cookies)
+            {
+                if (cookie.Name == "__Secure-1PSID" && string.IsNullOrEmpty(psid))
+                {
+                    psid = cookie.Value;
+                    AppendLog($"[쿠키추출] __Secure-1PSID 발견 (길이: {psid?.Length})");
+                }
+                else if (cookie.Name == "__Secure-1PSIDTS" && string.IsNullOrEmpty(psidts))
+                {
+                    psidts = cookie.Value;
+                    AppendLog("[쿠키추출] __Secure-1PSIDTS 발견");
+                }
+            }
+            
+            // User-Agent 추출
+            var userAgent = await webView.CoreWebView2.ExecuteScriptAsync("navigator.userAgent");
+            userAgent = userAgent?.Trim('"');
+            
+            if (!string.IsNullOrEmpty(psid))
+            {
+                AppendLog("[쿠키추출] 쿠키 추출 완료!");
+            }
+            else
+            {
+                AppendLog("[쿠키추출] __Secure-1PSID를 찾을 수 없습니다. 로그인이 필요합니다.");
+            }
+            
+            return (psid, psidts, userAgent);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"[쿠키추출] 오류: {ex.Message}");
+            return (null, null, null);
+        }
     }
 
     /// <summary>
@@ -750,7 +878,8 @@ public partial class MainForm : Form
                 var modeText = useLoginMode ? "로그인" : "비로그인";
                 if (btnModeWebView != null)
                 {
-                    btnModeWebView.Text = $"WebView ({modeText})";
+                    // 모델: 로그인/비로그인 모두 현재 3.0
+                    btnModeWebView.Text = $"WebView ({modeText} Gemini 3.0)";
                 }
                 
                 UpdateStatus($"WebView {modeText} 모드 활성화됨", Color.Green);

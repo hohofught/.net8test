@@ -160,7 +160,7 @@ public partial class MainForm
         var actionBar = new Panel { Dock = DockStyle.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(0, 10, 0, 5), MinimumSize = new Size(0, 95) };
         CreateActionBar(actionBar);
         
-        var editorSplit = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterDistance = 600, SplitterWidth = 4 };
+        var editorSplit = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterDistance = 900, SplitterWidth = 4 };
         editorSplit.Panel1.Padding = new Padding(0, 0, 5, 0);
         editorSplit.Panel2.Padding = new Padding(5, 0, 0, 0);
 

@@ -54,6 +54,9 @@ namespace GeminiWebTranslator.Services
         /// <summary>로그 이벤트</summary>
         public event Action<string>? OnLog;
         
+        /// <summary>스트리밍 업데이트 이벤트 - 생성 중인 부분 결과를 외부에 전달 (MORT 패턴)</summary>
+        public event Action<string>? OnStreamingUpdate;
+        
         /// <summary>초기화 완료 이벤트</summary>
         public event Action? OnInitialized;
         
@@ -113,17 +116,59 @@ namespace GeminiWebTranslator.Services
                     // 자동화 탐지 우회
                     _webView.CoreWebView2.Settings.IsWebMessageEnabled = true;
                     
-                    // Gemini 페이지로 이동
-                    _webView.CoreWebView2.Navigate("https://gemini.google.com/app");
+                    // 비로그인 모드: 이전 세션과의 충돌 방지를 위해 캐시/쿠키 정리
+                    if (!UseLoginMode)
+                    {
+                        try
+                        {
+                            OnLog?.Invoke("[SharedWebView] 비로그인 모드: 캐시/쿠키 정리 중...");
+                            await _webView.CoreWebView2.Profile.ClearBrowsingDataAsync(
+                                CoreWebView2BrowsingDataKinds.Cookies |
+                                CoreWebView2BrowsingDataKinds.CacheStorage |
+                                CoreWebView2BrowsingDataKinds.DiskCache
+                            );
+                            OnLog?.Invoke("[SharedWebView] 비로그인 모드: 캐시/쿠키 정리 완료");
+                        }
+                        catch (Exception cacheEx)
+                        {
+                            OnLog?.Invoke($"[SharedWebView] 캐시 정리 실패 (무시): {cacheEx.Message}");
+                        }
+                    }
+                    
+                    // 페이지 로드 완료 대기를 위한 TaskCompletionSource
+                    var navigationTcs = new TaskCompletionSource<bool>();
                     
                     // 네비게이션 완료 이벤트
-                    _webView.NavigationCompleted += (s, args) =>
+                    void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs args)
                     {
                         if (args.IsSuccess)
                         {
                             OnLog?.Invoke($"[SharedWebView] 페이지 로드 완료: {_webView.Source}");
+                            navigationTcs.TrySetResult(true);
                         }
-                    };
+                        else
+                        {
+                            OnLog?.Invoke($"[SharedWebView] 페이지 로드 실패: {args.WebErrorStatus}");
+                            navigationTcs.TrySetResult(false);
+                        }
+                    }
+                    
+                    _webView.NavigationCompleted += OnNavigationCompleted;
+                    
+                    // Gemini 페이지로 이동
+                    _webView.CoreWebView2.Navigate("https://gemini.google.com/app");
+                    
+                    // 페이지 로드 완료 대기 (최대 30초)
+                    var timeoutTask = Task.Delay(30000);
+                    var completedTask = await Task.WhenAny(navigationTcs.Task, timeoutTask);
+                    
+                    // 이벤트 핸들러 제거
+                    _webView.NavigationCompleted -= OnNavigationCompleted;
+                    
+                    if (completedTask == timeoutTask)
+                    {
+                        OnLog?.Invoke("[SharedWebView] 페이지 로드 타임아웃 (30초)");
+                    }
                     
                     _isInitialized = true;
                     OnLog?.Invoke("[SharedWebView] 초기화 완료 (gemini_session 프로필)");
@@ -267,6 +312,77 @@ namespace GeminiWebTranslator.Services
         public string? CurrentUrl => _webView?.Source?.ToString();
         
         /// <summary>
+        /// WebView2의 CookieManager API를 통해 Gemini 관련 쿠키를 추출합니다.
+        /// </summary>
+        /// <returns>PSID, PSIDTS, UserAgent 튜플</returns>
+        public async Task<(string? psid, string? psidts, string? userAgent)> ExtractCookiesAsync()
+        {
+            if (_webView?.CoreWebView2 == null)
+            {
+                OnLog?.Invoke("[SharedWebView] WebView가 초기화되지 않았습니다.");
+                return (null, null, null);
+            }
+            
+            try
+            {
+                OnLog?.Invoke("[SharedWebView] CookieManager를 통해 쿠키 추출 중...");
+                
+                // CookieManager API로 쿠키 가져오기 (HttpOnly 쿠키도 접근 가능)
+                // gemini.google.com에서 .google.com 도메인 쿠키도 함께 반환됨
+                var cookieManager = _webView.CoreWebView2.CookieManager;
+                var cookies = await cookieManager.GetCookiesAsync("https://gemini.google.com");
+                
+                OnLog?.Invoke($"[SharedWebView] gemini.google.com 에서 쿠키 {cookies.Count}개 발견");
+                
+                // 디버그: 모든 쿠키 이름과 도메인 출력
+                OnLog?.Invoke("[SharedWebView] === 발견된 쿠키 목록 ===");
+                foreach (var c in cookies)
+                {
+                    var valuePreview = c.Value.Length > 20 ? c.Value.Substring(0, 20) + "..." : c.Value;
+                    OnLog?.Invoke($"  - {c.Name} (도메인: {c.Domain}, 값: {valuePreview})");
+                }
+                OnLog?.Invoke("[SharedWebView] ========================");
+                
+                string? psid = null;
+                string? psidts = null;
+                
+                foreach (var cookie in cookies)
+                {
+                    if (cookie.Name == "__Secure-1PSID" && string.IsNullOrEmpty(psid))
+                    {
+                        psid = cookie.Value;
+                        OnLog?.Invoke($"[SharedWebView] __Secure-1PSID 쿠키 발견 (길이: {psid?.Length}, 도메인: {cookie.Domain})");
+                    }
+                    else if (cookie.Name == "__Secure-1PSIDTS" && string.IsNullOrEmpty(psidts))
+                    {
+                        psidts = cookie.Value;
+                        OnLog?.Invoke($"[SharedWebView] __Secure-1PSIDTS 쿠키 발견");
+                    }
+                }
+                
+                // User-Agent 추출
+                var userAgent = await ExecuteScriptAsync("navigator.userAgent");
+                userAgent = userAgent?.Trim('"');
+                
+                if (!string.IsNullOrEmpty(psid))
+                {
+                    OnLog?.Invoke("[SharedWebView] 쿠키 추출 완료!");
+                }
+                else
+                {
+                    OnLog?.Invoke("[SharedWebView] __Secure-1PSID 쿠키를 찾을 수 없습니다. 로그인이 필요합니다.");
+                }
+                
+                return (psid, psidts, userAgent);
+            }
+            catch (Exception ex)
+            {
+                OnLog?.Invoke($"[SharedWebView] 쿠키 추출 오류: {ex.Message}");
+                return (null, null, null);
+            }
+        }
+        
+        /// <summary>
         /// 로그인 상태를 확인합니다.
         /// </summary>
         public async Task<bool> CheckLoginStatusAsync()
@@ -358,6 +474,7 @@ namespace GeminiWebTranslator.Services
             {
                 _automation = new GeminiAutomation(_webView);
                 _automation.OnLog += msg => OnLog?.Invoke(msg);
+                _automation.OnStreamingUpdate += partial => OnStreamingUpdate?.Invoke(partial);
             }
             
             return _automation;

@@ -18,8 +18,7 @@ namespace GeminiWebTranslator.Forms
     public class HttpSettingsForm : Form
     {
         // UI 컨트롤 선언
-        private Button? btnAutoExtract;  // 자동 추출 버튼
-        private Button? btnResetBrowser; // 브라우저 초기화 버튼
+        private Button? btnAutoExtract;  // WebView에서 쿠키 추출 버튼
         private Button? btnManualLoad;   // 파일 로드 버튼
         private Button? btnSave;         // 저장 및 적용 버튼
         private TextBox? txtPSID;        // __Secure-1PSID 입력 칸
@@ -48,7 +47,7 @@ namespace GeminiWebTranslator.Forms
             
             this.Text = "HTTP API 및 쿠키 통합 설정";
             this.MinimizeBox = false;
-            this.Size = new Size(560, 560); // 모델 선택 제거로 높이 줄임
+            this.Size = new Size(560, 560); // 간소화된 UI에 맞게 높이 축소
             this.BackColor = UiTheme.ColorBackground;
             
             InitializeComponents();
@@ -84,48 +83,32 @@ namespace GeminiWebTranslator.Forms
             // --- 자동 추출 및 파일 로드 그룹 ---
             var gbAuto = new GroupBox
             {
-                Text = " 자동 추출 및 파일 로드 ",
+                Text = " 쿠키 추출 ",
                 Location = new Point(30, 105),
-                Size = new Size(485, 95),
+                Size = new Size(485, 90),
                 ForeColor = UiTheme.ColorPrimary,
                 Font = new Font("Segoe UI Semibold", 9)
             };
 
             btnAutoExtract = new Button
             {
-                Text = "🚀 독립 브라우저 실행",
+                Text = "� WebView에서 쿠키 추출",
                 Location = new Point(15, 30),
-                Size = new Size(165, 45),
+                Size = new Size(250, 45),
                 BackColor = UiTheme.ColorSuccess,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                Font = new Font("Segoe UI", 10f, FontStyle.Bold),
                 Cursor = Cursors.Hand
             };
             btnAutoExtract.FlatAppearance.BorderSize = 0;
             btnAutoExtract.Click += BtnAutoExtract_Click;
 
-            btnResetBrowser = new Button
-            {
-                Text = "🔄 초기화",
-                Location = new Point(185, 30),
-                Size = new Size(80, 45),
-                BackColor = UiTheme.ColorSurfaceLight,
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 9f),
-                Cursor = Cursors.Hand
-            };
-            var toolTip = new ToolTip();
-            toolTip.SetToolTip(btnResetBrowser, "브라우저 파일을 삭제하고 다시 설치합니다. (오류 발생 시 권장)");
-            btnResetBrowser.FlatAppearance.BorderSize = 0;
-            btnResetBrowser.Click += BtnResetBrowser_Click;
-            
             btnManualLoad = new Button
             {
                 Text = "📁 쿠키 파일 열기",
-                Location = new Point(270, 30),
-                Size = new Size(200, 45),
+                Location = new Point(280, 30),
+                Size = new Size(190, 45),
                 BackColor = UiTheme.ColorSurface,
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
@@ -134,13 +117,18 @@ namespace GeminiWebTranslator.Forms
             };
             btnManualLoad.FlatAppearance.BorderSize = 0;
             btnManualLoad.Click += BtnManualLoad_Click;
-            gbAuto.Controls.AddRange(new Control[] { btnAutoExtract, btnResetBrowser, btnManualLoad });
+            
+            // 툴팁 설정
+            var toolTip2 = new ToolTip();
+            toolTip2.SetToolTip(btnAutoExtract, "MainForm의 WebView에서 로그인된 세션의 쿠키를 추출합니다.");
+            
+            gbAuto.Controls.AddRange(new Control[] { btnAutoExtract, btnManualLoad });
 
             // --- 수동 입력 그룹 ---
             var gbManual = new GroupBox
             {
                 Text = " 상세 설정 (수동 편집) ",
-                Location = new Point(30, 215),
+                Location = new Point(30, 210),
                 Size = new Size(485, 230),
                 ForeColor = Color.FromArgb(200, 200, 200),
                 Font = new Font("Segoe UI Semibold", 9)
@@ -160,8 +148,8 @@ namespace GeminiWebTranslator.Forms
             // 상태 안내문
             lblStatus = new Label
             {
-                Text = "설정값을 입력하거나 브라우저에서 추출하세요.",
-                Location = new Point(30, 455),
+                Text = "설정값을 입력하거나 WebView에서 추출하세요.",
+                Location = new Point(30, 450),
                 ForeColor = Color.FromArgb(255, 200, 100),
                 AutoSize = true,
                 Width = 485,
@@ -172,7 +160,7 @@ namespace GeminiWebTranslator.Forms
             btnSave = new Button
             {
                 Text = "💾 설정 저장 및 API 적용",
-                Location = new Point(30, 485),
+                Location = new Point(30, 480),
                 Size = new Size(320, 50),
                 BackColor = UiTheme.ColorPrimary,
                 ForeColor = Color.White,
@@ -187,7 +175,7 @@ namespace GeminiWebTranslator.Forms
             btnReconnectApi = new Button
             {
                 Text = "🔄 재연결",
-                Location = new Point(360, 485),
+                Location = new Point(360, 480),
                 Size = new Size(155, 50),
                 BackColor = UiTheme.ColorSuccess,
                 ForeColor = Color.White,
@@ -234,175 +222,120 @@ namespace GeminiWebTranslator.Forms
         private void Log(string msg) => OnLog?.Invoke(msg);
 
         /// <summary>
-        /// 독립 브라우저 실행 버튼 클릭 이벤트
+        /// WebView에서 쿠키 추출 버튼 클릭 이벤트
+        /// SharedWebViewManager의 로그인 모드 WebView를 사용하여 쿠키를 추출합니다.
         /// </summary>
         private async void BtnAutoExtract_Click(object? sender, EventArgs e)
         {
             if (btnAutoExtract == null || lblStatus == null || txtPSID == null) return;
             
             btnAutoExtract.Enabled = false;
-            lblStatus.Text = "독립 브라우저 실행 중... 로그인을 진행해 주세요.";
+            lblStatus.Text = "로그인 전용 WebView 초기화 중...";
             lblStatus.ForeColor = Color.Orange;
             
             try
             {
-                Log("[HTTP] 독립 브라우저 실행 시도");
-                // SharedWebViewManager를 사용하여 WebView2 브라우저를 띄우고 쿠키 추출
-                var (psid, psidts, userAgent) = await ExtractCookiesFromIsolatedBrowserAsync();
+                Log("[HTTP] SharedWebViewManager 로그인 모드로 쿠키 추출 시도");
+                
+                // SharedWebViewManager를 로그인 모드로 설정
+                var manager = SharedWebViewManager.Instance;
+                manager.UseLoginMode = true; // 로그인 모드 강제 설정
+                manager.OnLog += msg => Log(msg);
+                
+                // WebView 초기화 (창 표시)
+                lblStatus.Text = "WebView 로그인 창 열기 중...";
+                if (!await manager.InitializeAsync(showWindow: true))
+                {
+                    lblStatus.Text = "[실패] WebView 초기화 실패";
+                    lblStatus.ForeColor = Color.Red;
+                    return;
+                }
+                
+                // 현재 쿠키 확인
+                var (psid, psidts, userAgent) = await manager.ExtractCookiesAsync();
                 
                 if (!string.IsNullOrEmpty(psid))
                 {
-                    // 추출된 정보를 화면의 입력칸에 자동 채움
-                    txtPSID.Text = psid;
-                    txtPSIDTS!.Text = psidts ?? "";
-                    txtUserAgent!.Text = userAgent ?? "";
-                    
+                    // 이미 로그인되어 있음 - 바로 추출
+                    FillCookieFields(psid, psidts, userAgent);
                     lblStatus.Text = "[성공] 쿠키 추출 성공! 이제 '저장'을 눌러주세요.";
                     lblStatus.ForeColor = Color.Lime;
-                    Log("[HTTP] 쿠키 추출 완료");
+                    Log("[HTTP] SharedWebViewManager에서 쿠키 추출 완료");
+                    manager.HideBrowserWindow();
+                    return;
                 }
-                else
+                
+                // 로그인 필요 - 브라우저 창 표시
+                Log("[HTTP] 로그인이 필요합니다. 로그인 창을 엽니다.");
+                lblStatus.Text = "로그인 창에서 Google 계정으로 로그인하세요...";
+                lblStatus.ForeColor = Color.Yellow;
+                manager.ShowBrowserWindow(autoCloseOnLogin: false);
+                
+                
+                // 최대 3분간 로그인 모니터링
+                for (int i = 0; i < 180; i++)
                 {
-                    lblStatus.Text = "[실패] 쿠키를 찾을 수 없습니다. 로그인이 필요합니다.";
-                    lblStatus.ForeColor = Color.Red;
+                    await Task.Delay(1000);
+                    
+                    try
+                    {
+                        // SharedWebViewManager에서 쿠키 확인
+                        var (extractedPsid, extractedPsidts, extractedUa) = await manager.ExtractCookiesAsync();
+                        
+                        if (!string.IsNullOrEmpty(extractedPsid))
+                        {
+                            Log($"[HTTP] 로그인 감지! 쿠키 추출 성공 (PSID 길이: {extractedPsid.Length})");
+                            FillCookieFields(extractedPsid, extractedPsidts, extractedUa);
+                            lblStatus.Text = "[성공] 로그인 감지! 쿠키가 자동으로 추출되었습니다.";
+                            lblStatus.ForeColor = Color.Lime;
+                            
+                            // 로그인 창 닫기
+                            manager.HideBrowserWindow();
+                            
+                            // 이 창을 다시 앞으로
+                            this.BringToFront();
+                            this.Activate();
+                            return;
+                        }
+                        
+                        // 10초마다 상태 업데이트
+                        if (i > 0 && i % 10 == 0)
+                        {
+                            lblStatus.Text = $"로그인 대기 중... ({180 - i}초 남음)";
+                            Log($"[HTTP] 로그인 대기 중... ({i}초 경과)");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"[HTTP] 쿠키 확인 오류: {ex.Message}");
+                    }
                 }
+                
+                // 타임아웃 - 브라우저 창은 열어둠
+                lblStatus.Text = "[타임아웃] 3분이 지났습니다. 로그인 후 다시 시도하세요.";
+                lblStatus.ForeColor = Color.Red;
+                Log("[HTTP] 로그인 대기 타임아웃 (3분)");
             }
             catch (Exception ex)
             {
                 lblStatus.Text = $"[실패] 오류: {ex.Message}";
                 lblStatus.ForeColor = Color.Red;
+                Log($"[HTTP] 쿠키 추출 오류: {ex.Message}");
             }
             finally
             {
                 btnAutoExtract.Enabled = true;
             }
-        }
-
-        /// <summary>
-        /// 브라우저 초기화 버튼 클릭 이벤트
-        /// </summary>
-        private async void BtnResetBrowser_Click(object? sender, EventArgs e)
-        {
-            if (btnResetBrowser == null || lblStatus == null) return;
-            
-            if (MessageBox.Show("WebView2 세션을 초기화하시겠습니까?\n로그인 상태가 초기화됩니다.", "세션 초기화", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-
-            btnResetBrowser.Enabled = false;
-            btnAutoExtract!.Enabled = false;
-            lblStatus.Text = "WebView2 세션 초기화 중...";
-            
-            try
-            {
-                // gemini_session 폴더 삭제
-                var sessionPath = Path.Combine(_profileDir, "gemini_session");
-                if (Directory.Exists(sessionPath))
-                {
-                    Directory.Delete(sessionPath, true);
-                    lblStatus.Text = "[성공] 세션 초기화 완료!";
-                    lblStatus.ForeColor = Color.Lime;
-                    Log("[HTTP] WebView2 세션 초기화 완료");
-                }
-                else
-                {
-                    lblStatus.Text = "[알림] 초기화할 세션이 없습니다.";
-                    lblStatus.ForeColor = Color.Yellow;
-                }
-            }
-            catch (Exception ex)
-            {
-                lblStatus.Text = $"[실패] 초기화 실패: {ex.Message}";
-                lblStatus.ForeColor = Color.Red;
-            }
-            finally
-            {
-                btnResetBrowser.Enabled = true;
-                btnAutoExtract.Enabled = true;
-            }
-
-            await Task.CompletedTask;
         }
         
         /// <summary>
-        /// SharedWebViewManager를 사용하여 WebView2를 실행하고 쿠키를 추출합니다.
+        /// 쿠키 필드에 값을 채웁니다.
         /// </summary>
-        private async Task<(string? psid, string? psidts, string? userAgent)> ExtractCookiesFromIsolatedBrowserAsync()
+        private void FillCookieFields(string? psid, string? psidts, string? userAgent)
         {
-            try
-            {
-                // SharedWebViewManager 싱글톤 사용
-                var manager = SharedWebViewManager.Instance;
-                manager.OnLog += msg => Log(msg);
-                
-                lblStatus?.Invoke(() => lblStatus.Text = "WebView2 초기화 중...");
-                
-                // WebView2 초기화 (창 표시)
-                if (!await manager.InitializeAsync(showWindow: true))
-                {
-                    return (null, null, null);
-                }
-                
-                lblStatus?.Invoke(() => lblStatus.Text = "Gemini에 로그인해 주세요... (최대 3분 대기)");
-                
-                // 사용자가 로그인할 시간을 주기 위해 쿠키가 나타날 때까지 반복 감시 (최대 3분)
-                string? psid = null;
-                string? psidts = null;
-                
-                for (int i = 0; i < 180; i++)
-                {
-                    try
-                    {
-                        var loginStatus = await manager.CheckLoginStatusAsync();
-                        if (loginStatus)
-                        {
-                            // 쿠키 추출을 위한 스크립트 실행
-                            var cookieScript = @"
-                            (function() {
-                                var cookies = document.cookie.split(';');
-                                var result = {};
-                                for (var i = 0; i < cookies.length; i++) {
-                                    var cookie = cookies[i].trim();
-                                    var parts = cookie.split('=');
-                                    if (parts.length >= 2) {
-                                        result[parts[0]] = parts.slice(1).join('=');
-                                    }
-                                }
-                                return JSON.stringify(result);
-                            })()";
-                            
-                            var cookieJson = await manager.ExecuteScriptAsync(cookieScript);
-                            if (!string.IsNullOrEmpty(cookieJson) && cookieJson != "null")
-                            {
-                                var cookies = Newtonsoft.Json.Linq.JObject.Parse(cookieJson.Trim('"').Replace("\\\"", "\""));
-                                psid = cookies["__Secure-1PSID"]?.ToString();
-                                psidts = cookies["__Secure-1PSIDTS"]?.ToString();
-                                
-                                if (!string.IsNullOrEmpty(psid))
-                                {
-                                    Log($"[HTTP] 쿠키 추출 성공: PSID 발견");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    catch { }
-                    
-                    await Task.Delay(1000);
-                }
-                
-                // User-Agent 추출
-                var userAgent = await manager.ExecuteScriptAsync("navigator.userAgent");
-                userAgent = userAgent?.Trim('"');
-                
-                // WebView 창 숨기기
-                manager.HideBrowserWindow();
-                
-                return (psid, psidts, userAgent);
-            }
-            catch (Exception ex)
-            {
-                Log($"[HTTP] 쿠키 추출 오류: {ex.Message}");
-                return (null, null, null);
-            }
+            if (txtPSID != null) txtPSID.Text = psid ?? "";
+            if (txtPSIDTS != null) txtPSIDTS.Text = psidts ?? "";
+            if (txtUserAgent != null) txtUserAgent.Text = userAgent ?? "";
         }
         
         /// <summary>

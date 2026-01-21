@@ -14,7 +14,6 @@
     <PackageReference Include="Emgu.CV" Version="4.8.1.5350" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="*" />
-    <PackageReference Include="PuppeteerSharp" Version="20.2.5" />
   </ItemGroup>
 
   <ItemGroup>

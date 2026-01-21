@@ -1,6 +1,7 @@
 #nullable enable
 using System;
 using System.Threading.Tasks;
+using GeminiWebTranslator.Models;
 
 namespace GeminiWebTranslator;
 
@@ -13,8 +14,23 @@ public interface IGeminiAutomation
     /// <summary>로그 이벤트</summary>
     event Action<string>? OnLog;
     
+    /// <summary>스트리밍 업데이트 이벤트 - 생성 중인 부분 결과를 외부에 전달 (MORT 패턴)</summary>
+    event Action<string>? OnStreamingUpdate;
+    
+    /// <summary>모델 감지 이벤트 - 번역 시 실제 사용 중인 모델 정보를 전달 (헤더 ID 기반)</summary>
+    event Action<GeminiModelInfo>? OnModelDetected;
+    
+    /// <summary>마지막으로 감지된 모델 정보</summary>
+    GeminiModelInfo? LastDetectedModel { get; }
+    
     /// <summary>연결 상태 (WebView/CDP 공통)</summary>
     bool IsConnected { get; }
+    
+    /// <summary>세션 갱신 중 여부</summary>
+    bool IsRefreshing { get; }
+    
+    /// <summary>현재 번역 카운트 (SESSION_REFRESH_INTERVAL에 도달하면 자동 갱신)</summary>
+    int TranslationCount { get; }
     
     #region 기본 작업
     

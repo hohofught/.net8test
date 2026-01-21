@@ -111,6 +111,46 @@ namespace GeminiWebTranslator
                 throw new Exception($"초기화 실패: {ex.Message}", ex);
             }
         }
+        
+        /// <summary>
+        /// WebView에서 추출한 쿠키 값으로 직접 초기화합니다.
+        /// </summary>
+        /// <param name="psid">__Secure-1PSID 쿠키 값</param>
+        /// <param name="psidts">__Secure-1PSIDTS 쿠키 값 (선택)</param>
+        /// <param name="userAgent">User-Agent 문자열 (선택)</param>
+        /// <returns>초기화 성공 여부</returns>
+        public async Task<bool> InitializeFromCookiesAsync(string psid, string? psidts = null, string? userAgent = null)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(psid))
+                {
+                    throw new ArgumentException("__Secure-1PSID 쿠키가 필요합니다.");
+                }
+                
+                _secure1PSID = psid;
+                _secure1PSIDTS = psidts;
+                _userAgent = userAgent;
+                
+                Log("WebView 쿠키로 초기화 시작...");
+                
+                // HttpClient 및 공통 헤더 설정
+                InitializeHttpClient();
+                
+                // API 호출에 필수적인 SNlM0e 토큰 추출
+                Log("SNlM0e 토큰 추출 중...");
+                await ExtractSnlm0eTokenAsync();
+                
+                IsInitialized = true;
+                Log("WebView 쿠키로 초기화 완료");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"초기화 실패: {ex.Message}");
+                throw new Exception($"초기화 실패: {ex.Message}", ex);
+            }
+        }
 
         /// <summary>
         /// Netscape 형식의 쿠키 텍스트를 파싱하여 값을 추출합니다.

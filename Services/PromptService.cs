@@ -22,8 +22,8 @@ namespace GeminiWebTranslator.Services
         {
             var sb = new StringBuilder();
 
-            // 1. 핵심 지침 (간결화)
-            sb.AppendLine("번역 지침: 자연스러운 한국어 구어체, 로봇 말투/과잉 존칭 금지, 원어민처럼 자연스럽게.");
+            // 1. 핵심 지침 (간결화) + 목표 언어
+            sb.AppendLine($"번역 지침: {targetLang}로 자연스러운 구어체 번역, 로봇 말투/과잉 존칭 금지, 원어민처럼 자연스럽게.");
             
             // 2. 커스텀 지침 (가장 우선)
             if (!string.IsNullOrEmpty(customInstructions)) 

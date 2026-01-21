@@ -257,15 +257,16 @@ public class WebViewSettingsForm : Form
                 var isLoggedIn = await manager.CheckLoginStatusAsync();
                 if (isLoggedIn)
                 {
-                    lblSessionInfo.Text = "✓ 준비됨 (로그인)";
+                    lblSessionInfo.Text = "✓ 준비됨 (로그인 - Gemini 3.0)";
                     lblSessionInfo.ForeColor = UiTheme.ColorSuccess;
                 }
                 else
                 {
-                    // 비로그인 모드인 경우
+                    // 비로그인 모드인 경우 - 모델 버전 표시
                     if (!manager.UseLoginMode)
                     {
-                        lblSessionInfo.Text = "✓ 준비됨 (비로그인)";
+                        // 비로그인도 현재 Gemini 3.0 Flash
+                        lblSessionInfo.Text = "✓ 준비됨 (비로그인 - Gemini 3.0)";
                         lblSessionInfo.ForeColor = UiTheme.ColorSuccess;
                     }
                     else
