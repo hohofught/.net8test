@@ -266,8 +266,7 @@ namespace GeminiWebTranslator.Forms
             }
             
             txtLog.AppendText($"{message}\n");
-            txtLog.SelectionStart = txtLog.Text.Length;
-            txtLog.ScrollToCaret();
+            // 자동 스크롤 비활성화 - 사용자가 직접 스크롤 가능
         }
 
         private Button CreateDebugButton(string text, Color color)

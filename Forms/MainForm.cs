@@ -235,10 +235,6 @@ public partial class MainForm : Form
             }
 
             // 2. WebView 모드 진단
-            // 로그인 모드 정보 가져오기
-            var manager = SharedWebViewManager.Instance;
-            var loginModeText = manager.UseLoginMode ? "로그인" : "비로그인";
-            
             if (automation != null)
             {
                 // 실제 진단 수행 (백그라운드에서 주기적으로)
@@ -255,11 +251,11 @@ public partial class MainForm : Form
                         var modelDisplay = !string.IsNullOrEmpty(modelInfo.ModelVersion) 
                             ? $"Gemini {modelInfo.ModelVersion}" 
                             : "Gemini";
-                        msg = $"WebView ({loginModeText}/{modelDisplay})"; 
+                        msg = $"WebView ({modelDisplay})"; 
                         col = UiTheme.ColorSuccess; 
                         break;
-                    case WebViewStatus.Generating: msg = $"WebView ({loginModeText}/생성중)"; col = UiTheme.ColorWarning; break;
-                    case WebViewStatus.Loading: msg = $"WebView ({loginModeText}/로딩중)"; col = UiTheme.ColorPrimary; break;
+                    case WebViewStatus.Generating: msg = "WebView (생성중)"; col = UiTheme.ColorWarning; break;
+                    case WebViewStatus.Loading: msg = "WebView (로딩중)"; col = UiTheme.ColorPrimary; break;
                     case WebViewStatus.WrongPage: msg = "WebView (페이지이동필요)"; col = UiTheme.ColorWarning; break;
                     case WebViewStatus.LoginNeeded: msg = "WebView (로그인필요)"; col = UiTheme.ColorError; break;
                     case WebViewStatus.Disconnected: msg = "WebView (연결끊김)"; col = UiTheme.ColorStatusOff; break;
@@ -812,13 +808,22 @@ public partial class MainForm : Form
     }
 
     /// <summary>
-    /// [HTTP 설정] 버튼 클릭 시 호출 - 통합 설정 창을 띄웁니다.
+    /// [HTTP 설정] 버튼 클릭 시 호출 - HTTP 설정 폼을 엽니다.
     /// </summary>
     private void BtnModeHttpSettings_Click(object? sender, EventArgs e)
     {
+        ShowHttpSettingsForm();
+    }
+    
+    /// <summary>
+    /// HTTP 모드 설정 화면 표시
+    /// </summary>
+    private void ShowHttpSettingsForm()
+    {
         useWebView2Mode = false;
         UpdateModeButtonsUI(btnModeHttp);
-        if (btnNanoBanana != null) btnNanoBanana.Enabled = true; // HTTP 모드에서는 NanoBanana 사용 가능
+        if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
+        
         _httpSettingsForm ??= new Forms.HttpSettingsForm(cookiePath, profileDir);
         _httpSettingsForm.OnLog += msg => AppendLog(msg);
         _httpSettingsForm.OnCookiesUpdated += async (cookies, userAgent) =>
@@ -831,7 +836,13 @@ public partial class MainForm : Form
                 await httpClient.SaveCookiesAsync(cookiePath, cookies, null, userAgent, null);
                 await httpClient.InitializeAsync(cookiePath);
 
-                UpdateStatus("HTTP API 준비됨", System.Drawing.Color.Green);
+                // 버튼 텍스트 업데이트
+                if (btnModeHttp != null)
+                {
+                    btnModeHttp.Text = "HTTP (로그인)";
+                }
+                
+                UpdateStatus("🔐 HTTP API 준비됨 (로그인)", System.Drawing.Color.Green);
                 btnTranslate.Enabled = true;
             }
             catch (Exception ex)

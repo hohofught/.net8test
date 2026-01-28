@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
+using GeminiWebTranslator.Models;
 
 namespace GeminiWebTranslator.Services
 {
@@ -60,10 +61,10 @@ namespace GeminiWebTranslator.Services
         /// <summary>초기화 완료 이벤트</summary>
         public event Action? OnInitialized;
         
-        /// <summary>로그인 모드 사용 여부 (false = 비로그인/익명 모드, 기본값: 비로그인)</summary>
-        public bool UseLoginMode { get; set; } = false;
+        /// <summary>로그인 모드 사용 여부 (호환성 유지용, 이제 항상 true와 유사하게 작동)</summary>
+        public bool UseLoginMode { get; set; } = true;
         
-        private SharedWebViewManager() { }
+        public SharedWebViewManager() { }
         
         /// <summary>
         /// WebView2를 초기화합니다. 별도 창에서 로그인 UI를 보여줄 수 있습니다.
@@ -115,25 +116,6 @@ namespace GeminiWebTranslator.Services
                     
                     // 자동화 탐지 우회
                     _webView.CoreWebView2.Settings.IsWebMessageEnabled = true;
-                    
-                    // 비로그인 모드: 이전 세션과의 충돌 방지를 위해 캐시/쿠키 정리
-                    if (!UseLoginMode)
-                    {
-                        try
-                        {
-                            OnLog?.Invoke("[SharedWebView] 비로그인 모드: 캐시/쿠키 정리 중...");
-                            await _webView.CoreWebView2.Profile.ClearBrowsingDataAsync(
-                                CoreWebView2BrowsingDataKinds.Cookies |
-                                CoreWebView2BrowsingDataKinds.CacheStorage |
-                                CoreWebView2BrowsingDataKinds.DiskCache
-                            );
-                            OnLog?.Invoke("[SharedWebView] 비로그인 모드: 캐시/쿠키 정리 완료");
-                        }
-                        catch (Exception cacheEx)
-                        {
-                            OnLog?.Invoke($"[SharedWebView] 캐시 정리 실패 (무시): {cacheEx.Message}");
-                        }
-                    }
                     
                     // 페이지 로드 완료 대기를 위한 TaskCompletionSource
                     var navigationTcs = new TaskCompletionSource<bool>();
@@ -211,7 +193,7 @@ namespace GeminiWebTranslator.Services
                 _hostForm.Opacity = 1.0;
                 
                 // 로그인 후 자동 닫힘
-                if (autoCloseOnLogin && UseLoginMode)
+                if (autoCloseOnLogin)
                 {
                     _ = MonitorLoginAndAutoCloseAsync();
                 }
@@ -378,6 +360,112 @@ namespace GeminiWebTranslator.Services
             catch (Exception ex)
             {
                 OnLog?.Invoke($"[SharedWebView] 쿠키 추출 오류: {ex.Message}");
+                return (null, null, null);
+            }
+        }
+        
+        /// <summary>
+        /// 숨겨진 WebView를 사용하여 쿠키를 자동으로 추출합니다.
+        /// JS 쓰로틀링 방지를 위해 Visible=true, Opacity=0.01, 화면 밖 위치 사용.
+        /// </summary>
+        /// <returns>PSID, PSIDTS, UserAgent 튜플</returns>
+        public async Task<(string? psid, string? psidts, string? userAgent)> ExtractCookiesSilentlyAsync()
+        {
+            OnLog?.Invoke("[SharedWebView] 숨겨진 WebView로 쿠키 자동 추출 시작...");
+            
+            try
+            {
+                // 이미 초기화된 경우 바로 쿠키 추출
+                if (_isInitialized && _hostForm != null && _webView?.CoreWebView2 != null)
+                {
+                    OnLog?.Invoke("[SharedWebView] 기존 WebView에서 쿠키 추출");
+                    return await ExtractCookiesAsync();
+                }
+                
+                // 새로 초기화 필요 - 숨겨진 모드로
+                OnLog?.Invoke("[SharedWebView] 새 WebView 초기화 (숨김 모드)...");
+                
+                // 프로필 폴더 생성
+                Directory.CreateDirectory(ProfilePath);
+                
+                // WebView2 Environment 생성
+                _environment ??= await CoreWebView2Environment.CreateAsync(null, ProfilePath);
+                
+                // 호스트 폼 생성 - JS 쓰로틀링 방지 설정
+                _hostForm = new Form
+                {
+                    Text = "Cookie Extraction (Hidden)",
+                    Size = new System.Drawing.Size(1200, 800),
+                    StartPosition = FormStartPosition.Manual,
+                    Location = new System.Drawing.Point(-2000, -2000),  // 화면 밖
+                    ShowInTaskbar = false,
+                    Opacity = 0.01,  // 거의 투명 (0이면 일부 시스템에서 문제 발생)
+                    WindowState = FormWindowState.Normal,  // 최소화 X (JS 쓰로틀링 방지)
+                    Visible = true  // 반드시 Visible! (JS 쓰로틀링 방지)
+                };
+                
+                // WebView2 컨트롤 생성
+                _webView = new WebView2 { Dock = DockStyle.Fill };
+                _hostForm.Controls.Add(_webView);
+                _hostForm.Show();  // 창 표시 (화면 밖)
+                
+                // WebView2 초기화
+                await _webView.EnsureCoreWebView2Async(_environment);
+                
+                if (_webView.CoreWebView2 == null)
+                {
+                    OnLog?.Invoke("[SharedWebView] WebView 초기화 실패");
+                    return (null, null, null);
+                }
+                
+                // User-Agent 설정
+                _webView.CoreWebView2.Settings.UserAgent = 
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+                
+                // 페이지 로드 완료 대기
+                var navigationTcs = new TaskCompletionSource<bool>();
+                void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs args)
+                {
+                    navigationTcs.TrySetResult(args.IsSuccess);
+                }
+                _webView.NavigationCompleted += OnNavigationCompleted;
+                
+                // Gemini 페이지로 이동
+                OnLog?.Invoke("[SharedWebView] Gemini 페이지 로드 중...");
+                _webView.CoreWebView2.Navigate("https://gemini.google.com/app");
+                
+                // 페이지 로드 완료 대기 (최대 30초)
+                var timeoutTask = Task.Delay(30000);
+                var completedTask = await Task.WhenAny(navigationTcs.Task, timeoutTask);
+                _webView.NavigationCompleted -= OnNavigationCompleted;
+                
+                if (completedTask == timeoutTask)
+                {
+                    OnLog?.Invoke("[SharedWebView] 페이지 로드 타임아웃");
+                    return (null, null, null);
+                }
+                
+                // 추가 대기 (JS 실행 완료)
+                await Task.Delay(2000);
+                
+                _isInitialized = true;
+                OnLog?.Invoke("[SharedWebView] 숨겨진 WebView 초기화 완료");
+                
+                // 쿠키 추출
+                var cookies = await ExtractCookiesAsync();
+                
+                // 창 완전히 숨기기 (쿠키 추출 완료 후)
+                if (_hostForm != null && !_hostForm.IsDisposed)
+                {
+                    _hostForm.Visible = false;
+                    OnLog?.Invoke("[SharedWebView] 숨겨진 WebView 창 닫음");
+                }
+                
+                return cookies;
+            }
+            catch (Exception ex)
+            {
+                OnLog?.Invoke($"[SharedWebView] 숨은 쿠키 추출 오류: {ex.Message}");
                 return (null, null, null);
             }
         }

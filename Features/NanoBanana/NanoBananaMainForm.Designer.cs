@@ -331,7 +331,16 @@ partial class NanoBananaMainForm
         this.chkLocalOcrRemoval.Checked = false;
         this.chkLocalOcrRemoval.Margin = new System.Windows.Forms.Padding(0, 5, 15, 0);
         
-        this.flowOptions.Controls.AddRange(new System.Windows.Forms.Control[] { this.chkProMode, this.chkImageGen, this.chkGeminiOcrAssist, this.chkLocalOcrRemoval });
+        this.chkUseHttpMode = new System.Windows.Forms.CheckBox();
+        this.chkUseHttpMode.Text = "⚡ HTTP 생성";
+        this.chkUseHttpMode.AutoSize = true;
+        this.chkUseHttpMode.ForeColor = System.Drawing.Color.FromArgb(100, 200, 255);  // 파란색 (HTTP 모드 표시)
+        this.chkUseHttpMode.Checked = false;
+        this.chkUseHttpMode.Margin = new System.Windows.Forms.Padding(0, 5, 15, 0);
+        var tooltipHttpMode = new System.Windows.Forms.ToolTip();
+        tooltipHttpMode.SetToolTip(this.chkUseHttpMode, "체크: HTTP API로 빠른 이미지 생성\n해제: WebView 자동화 사용");
+        
+        this.flowOptions.Controls.AddRange(new System.Windows.Forms.Control[] { this.chkProMode, this.chkImageGen, this.chkGeminiOcrAssist, this.chkLocalOcrRemoval, this.chkUseHttpMode });
         this.layoutSettings.Controls.Add(new System.Windows.Forms.Label { Text = "옵션:", TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill }, 0, 3);
         this.layoutSettings.Controls.Add(this.flowOptions, 1, 3);
         this.layoutSettings.SetColumnSpan(this.flowOptions, 2);
@@ -494,6 +503,7 @@ partial class NanoBananaMainForm
     private System.Windows.Forms.CheckBox chkImageGen;
     private System.Windows.Forms.CheckBox chkGeminiOcrAssist;
     private System.Windows.Forms.CheckBox chkLocalOcrRemoval;
+    private System.Windows.Forms.CheckBox chkUseHttpMode;
     private System.Windows.Forms.Button btnLaunchIsolated;
     private System.Windows.Forms.Button btnHideBrowser;
     

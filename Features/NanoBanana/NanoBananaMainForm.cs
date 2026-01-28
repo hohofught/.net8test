@@ -645,13 +645,188 @@ public partial class NanoBananaMainForm : Form
     
     private async Task<bool> ProcessSingleImageAsync(string imagePath, CancellationToken ct)
     {
-        if (_automation == null) return false;
-        
         var filename = Path.GetFileName(imagePath);
         
-        // WebView2 기반 자동화만 사용
+        // HTTP 모드 체크박스 확인
+        if (chkUseHttpMode.Checked)
+        {
+            return await ProcessWithHttpApiAsync(imagePath, ct);
+        }
+        
+        // WebView2 기반 자동화 사용
+        if (_automation == null) return false;
         return await ProcessWithWebViewAutomationAsync(imagePath, ct);
     }
+    
+    /// <summary>
+    /// HTTP API를 사용한 빠른 이미지 처리 (GeminiHttpClient 사용)
+    /// </summary>
+    private async Task<bool> ProcessWithHttpApiAsync(string imagePath, CancellationToken ct)
+    {
+        var filename = Path.GetFileName(imagePath);
+        
+        try
+        {
+            UpdateImageStatus(filename, "⚡ HTTP 처리 중...");
+            AppendLog($"  [HTTP] HTTP API 모드로 처리 시작");
+            
+            // GeminiHttpClient 인스턴스 가져오기 (싱글톤 또는 캐시된 인스턴스)
+            var httpClient = GetOrCreateHttpClient();
+            if (httpClient == null || !httpClient.IsInitialized)
+            {
+                AppendLogError("  [HTTP] HTTP 클라이언트가 초기화되지 않았습니다. 먼저 HTTP 설정에서 쿠키를 설정하세요.");
+                return false;
+            }
+            
+            // OCR 분석 (옵션)
+            string prompt;
+            if (chkGeminiOcrAssist.Checked)
+            {
+                UpdateImageStatus(filename, "⚡ OCR 분석 중...");
+                var ocrResult = await _ocrService.ExtractTextWithWatermarkInfoAsync(imagePath);
+                
+                if (ocrResult.HasAnyText)
+                {
+                    AppendLog($"  [OCR] 텍스트 {ocrResult.RawTexts.Count}개 감지");
+                    prompt = Services.PromptService.BuildNanoBananaPromptEx(
+                        ocrResult.WatermarkTexts, 
+                        ocrResult.ContentTextJoined);
+                }
+                else
+                {
+                    prompt = _config.BuildPrompt(null);
+                }
+            }
+            else
+            {
+                prompt = _config.BuildPrompt(null);
+            }
+            
+            // HTTP API로 이미지 업로드 및 편집
+            UpdateImageStatus(filename, "⚡ 이미지 업로드 중...");
+            
+            // 기존 이미지를 업로드하여 편집 (NanoBanana 핵심 기능)
+            var imageUrls = await httpClient.EditImageAsync(prompt, imagePath);
+            
+            if (imageUrls.Count > 0)
+            {
+                AppendLog($"  [HTTP] {imageUrls.Count}개 이미지 URL 수신");
+                
+                // 응답에서 이미지 URL 추출 및 저장
+                UpdateImageStatus(filename, "⚡ 결과 저장 중...");
+                var outputPath = Path.Combine(txtOutputFolder.Text, filename);
+                
+                // 첫 번째 이미지 다운로드 및 저장
+                using var downloadClient = new System.Net.Http.HttpClient();
+                var resultBytes = await downloadClient.GetByteArrayAsync(imageUrls[0], ct);
+                await File.WriteAllBytesAsync(outputPath, resultBytes, ct);
+                AppendLogSuccess($"  [HTTP] 이미지 저장됨: {outputPath}");
+            }
+            else
+            {
+                // 이미지 편집 실패 - 원본 복사
+                AppendLogWarning($"  [HTTP] 편집된 이미지 없음");
+                
+                // 원본 복사 (이미지 편집 실패)
+                var outputPath = Path.Combine(txtOutputFolder.Text, filename);
+                File.Copy(imagePath, outputPath, true);
+                AppendLogWarning($"  [HTTP] 이미지 편집 실패 - 원본 복사됨");
+            }
+            
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppendLogError($"  [HTTP] 오류: {ex.Message}");
+            return false;
+        }
+    }
+    
+    private GeminiHttpClient? _cachedHttpClient;
+    
+    private GeminiHttpClient? GetOrCreateHttpClient()
+    {
+        if (_cachedHttpClient == null)
+        {
+            _cachedHttpClient = new GeminiHttpClient();
+            
+            // 쿠키 파일에서 자동 초기화 시도
+            var cookiePath = Path.Combine(AppContext.BaseDirectory, "gemini_cookies.json");
+            if (File.Exists(cookiePath))
+            {
+                try
+                {
+                    // 파일 공유 모드로 읽기 (WebView2 잠금 방지)
+                    string json;
+                    using (var stream = new FileStream(cookiePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    using (var reader = new StreamReader(stream))
+                    {
+                        json = reader.ReadToEnd();
+                    }
+                    var cookies = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+                    if (cookies != null && cookies.TryGetValue("__Secure-1PSID", out var psid))
+                    {
+                        cookies.TryGetValue("__Secure-1PSIDTS", out var psidts);
+                        cookies.TryGetValue("User-Agent", out var ua);
+                        _ = _cachedHttpClient.InitializeFromCookiesAsync(psid, psidts, ua);
+                        AppendLog("[HTTP] 쿠키 파일에서 HTTP 클라이언트 초기화됨");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AppendLogError($"[HTTP] 쿠키 로드 실패: {ex.Message}");
+                }
+            }
+        }
+        
+        // 자동 삭제 설정 반영 (HttpSettingsForm 전역 설정 사용)
+        if (_cachedHttpClient != null)
+        {
+            _cachedHttpClient.AutoDeleteEnabled = Forms.HttpSettingsForm.GlobalHttpAutoDeleteEnabled;
+            
+            // 쿠키 재추출 콜백 연결 (숨겨진 WebView 사용)
+            if (_cachedHttpClient.OnCookieRefreshNeeded == null)
+            {
+                _cachedHttpClient.OnCookieRefreshNeeded = async () =>
+                {
+                    AppendLog("[HTTP] 쿠키 재추출 중 (숨겨진 WebView)...");
+                    
+                    // 기존 SharedWebViewManager 사용 또는 새로 생성
+                    _sharedWebViewManager ??= new SharedWebViewManager();
+                    _sharedWebViewManager.OnLog += AppendLogWrapper;
+                    
+                    var cookies = await _sharedWebViewManager.ExtractCookiesSilentlyAsync();
+                    if (!string.IsNullOrEmpty(cookies.psid))
+                    {
+                        AppendLogSuccess("[HTTP] 쿠키 재추출 성공!");
+                    }
+                    else
+                    {
+                        AppendLogWarning("[HTTP] 쿠키 재추출 실패 - 로그인이 필요합니다.");
+                    }
+                    return cookies;
+                };
+            }
+        }
+        
+        return _cachedHttpClient;
+    }
+
+    
+    private static string GetMimeType(string filePath)
+    {
+        var ext = Path.GetExtension(filePath).ToLowerInvariant();
+        return ext switch
+        {
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".png" => "image/png",
+            ".webp" => "image/webp",
+            ".gif" => "image/gif",
+            ".bmp" => "image/bmp",
+            _ => "image/jpeg"
+        };
+    }
+
     
     /// <summary>
     /// WebView2 기반 자동화를 사용한 이미지 처리
