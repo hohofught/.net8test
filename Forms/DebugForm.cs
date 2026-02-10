@@ -12,7 +12,7 @@ namespace GeminiWebTranslator.Forms
     public class DebugForm : Form
     {
         private readonly MainForm _mainForm;
-        
+
         private RichTextBox? txtLog;
 
         public DebugForm(MainForm mainForm)
@@ -39,14 +39,17 @@ namespace GeminiWebTranslator.Forms
                 Orientation = Orientation.Horizontal,
                 BackColor = UiTheme.ColorBackground
             };
-            
+
             // Panel MinSize와 SplitterDistance를 폼 로드 후 안전하게 설정
-            this.Load += (s, e) => {
-                try {
+            this.Load += (s, e) =>
+            {
+                try
+                {
                     splitContainer.Panel1MinSize = 180;
                     splitContainer.Panel2MinSize = 150;
                     splitContainer.SplitterDistance = Math.Max(180, Math.Min(250, splitContainer.Height - 150));
-                } catch { }
+                }
+                catch { }
             };
 
             // === 상단: 버튼 패널 ===
@@ -68,59 +71,85 @@ namespace GeminiWebTranslator.Forms
                 Margin = new Padding(0, 0, 0, 15)
             };
 
-            // WebView 브라우저 열기 (별도 창)
-            var btnOpenWebView = CreateDebugButton("🌐 WebView 브라우저 창 열기", UiTheme.ColorPrimary);
-            btnOpenWebView.Click += (s, e) =>
+            // === 브라우저 프로필 제어 ===
+            var lblBrowserTitle = new Label { Text = "브라우저 및 세션 제어", Font = UiTheme.FontHeader, ForeColor = UiTheme.ColorTextMuted, AutoSize = true, Margin = new Padding(0, 5, 0, 5) };
+
+            // 1. 현재 실행 중인 WebView 보기
+            var btnOpenCurrent = CreateDebugButton("🌐 [현재] WebView 브라우저 보기", UiTheme.ColorPrimary);
+            btnOpenCurrent.Click += (s, e) =>
             {
+                AppendLocalLog("[Debug] 현재 실행 중인 WebView 창 열기 시도...");
                 _mainForm.ShowBrowserWindow();
             };
 
-            // WebView 로그인 모드 창 열기 (SharedWebViewManager 사용)
-            var btnWebViewLogin = CreateDebugButton("🔐 WebView 로그인 창 열기", UiTheme.ColorSuccess);
-            btnWebViewLogin.Click += async (s, e) =>
+            // 2. 로그인 프로필 전용 브라우저
+            var btnOpenLogin = CreateDebugButton("🔐 [로그인 프로필] 브라우저 열기", UiTheme.ColorSuccess);
+            btnOpenLogin.Click += async (s, e) =>
             {
-                btnWebViewLogin.Enabled = false;
-                AppendLocalLog("[Debug] WebView 로그인 창 열기 시도...");
+                btnOpenLogin.Enabled = false;
+                AppendLocalLog("[Debug] [로그인 프로필] 브라우저 열기 시도 (gemini_session)...");
                 try
                 {
-                    var manager = SharedWebViewManager.Instance;
-                    manager.OnLog += msg => AppendLocalLog(msg);
-                    
-                    // 로그인 모드로 설정하고 창 표시
-                    manager.UseLoginMode = true;
-                    
-                    if (await manager.InitializeAsync(showWindow: true))
-                    {
-                        // 디버그 모드에서는 자동 닫기 비활성화
-                        manager.ShowBrowserWindow(autoCloseOnLogin: false);
-                        AppendLocalLog("[Debug] [성공] WebView 로그인 창 열림 (자동 닫기 비활성화)");
-                    }
-                    else
-                    {
-                        AppendLocalLog("[Debug] [실패] WebView 초기화 실패");
-                        MessageBox.Show("WebView 초기화에 실패했습니다.", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
+                    await _mainForm.ShowDebugBrowserAsync(null); // null = profileDir
+                    AppendLocalLog("[Debug] [성공] 로그인 프로필 브라우저 열림");
                 }
                 catch (Exception ex)
                 {
                     AppendLocalLog($"[Debug] [실패] 오류: {ex.Message}");
-                    MessageBox.Show($"WebView 로그인 창 열기 실패:\n{ex.Message}", "오류", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
-                finally
+                finally { btnOpenLogin.Enabled = true; }
+            };
+
+            // 3. 비로그인 프로필 전용 브라우저
+            var btnOpenNonLogin = CreateDebugButton("🚀 [비로그인 프로필] 브라우저 열기", UiTheme.ColorSurfaceLight);
+            btnOpenNonLogin.Click += async (s, e) =>
+            {
+                btnOpenNonLogin.Enabled = false;
+                AppendLocalLog("[Debug] [비로그인 프로필] 브라우저 열기 시도 (gemini_session/webview)...");
+                try
                 {
-                    btnWebViewLogin.Enabled = true;
+                    await _mainForm.ShowDebugBrowserAsync("webview");
+                    AppendLocalLog("[Debug] [성공] 비로그인 프로필 브라우저 열림");
                 }
+                catch (Exception ex)
+                {
+                    AppendLocalLog($"[Debug] [실패] 오류: {ex.Message}");
+                }
+                finally { btnOpenNonLogin.Enabled = true; }
+            };
+
+            // 4. (기존) SharedWebViewManager 로그인 보조 도구
+            var btnWebViewLoginTool = CreateDebugButton("🔑 로그인 관리 도구 (Shared)", UiTheme.ColorSuccess);
+            btnWebViewLoginTool.Click += async (s, e) =>
+            {
+                btnWebViewLoginTool.Enabled = false;
+                AppendLocalLog("[Debug] SharedWebViewManager 로그인 도구 활성화...");
+                try
+                {
+                    var manager = SharedWebViewManager.Instance;
+                    manager.OnLog += msg => AppendLocalLog(msg);
+                    manager.UseLoginMode = true;
+                    if (await manager.InitializeAsync(showWindow: true))
+                    {
+                        manager.ShowBrowserWindow(autoCloseOnLogin: false);
+                        AppendLocalLog("[Debug] [성공] Shared 로그인 창 열림");
+                    }
+                }
+                catch (Exception ex) { AppendLocalLog($"[Debug] [실패] 오류: {ex.Message}"); }
+                finally { btnWebViewLoginTool.Enabled = true; }
             };
 
             // 브라우저 캐시 초기화
             var btnClearCache = CreateDebugButton("🧹 브라우저 캐시 초기화", UiTheme.ColorSurfaceLight);
-            btnClearCache.Click += (s, e) => {
+            btnClearCache.Click += (s, e) =>
+            {
                 AppendLocalLog("[Debug] 브라우저 캐시 초기화 버튼 클릭 (미구현)");
             };
 
             // 브라우저 서비스 강제 재시작 버튼
             var btnForceRestartBrowser = CreateDebugButton("🔥 브라우저 서비스 강제 재시작", UiTheme.ColorError);
-            btnForceRestartBrowser.Click += async (s, e) => {
+            btnForceRestartBrowser.Click += async (s, e) =>
+            {
                 btnForceRestartBrowser.Enabled = false;
                 AppendLocalLog("[Debug] 브라우저 서비스 강제 재시작 요청됨...");
                 try
@@ -188,28 +217,31 @@ namespace GeminiWebTranslator.Forms
 
             // 로그 폴더 열기 버튼
             var btnOpenLogs = CreateDebugButton("📂 로그 폴더 열기", UiTheme.ColorSurfaceLight);
-            btnOpenLogs.Click += (s, e) => {
-                try 
+            btnOpenLogs.Click += (s, e) =>
+            {
+                try
                 {
                     var logsPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
                     if (System.IO.Directory.Exists(logsPath))
                         System.Diagnostics.Process.Start("explorer.exe", logsPath);
                     else
                         MessageBox.Show("로그 폴더가 존재하지 않습니다.", "알림");
-                } 
+                }
                 catch { }
             };
 
             // 로그 지우기 버튼
             var btnClearLog = CreateDebugButton("🗑️ 로그 지우기", UiTheme.ColorSurface);
-            btnClearLog.Click += (s, e) => {
+            btnClearLog.Click += (s, e) =>
+            {
                 txtLog?.Clear();
                 _mainForm.ClearLogs();
             };
 
-            buttonPanel.Controls.AddRange(new Control[] { 
-                lblTitle, btnOpenWebView, btnWebViewLogin, btnRestartWebView, btnNewChat, btnClearCache, 
-                btnForceRestartBrowser, btnOpenLogs, btnClearLog 
+            buttonPanel.Controls.AddRange(new Control[] {
+                lblTitle, lblBrowserTitle, btnOpenCurrent, btnOpenLogin, btnOpenNonLogin, btnWebViewLoginTool,
+                btnRestartWebView, btnNewChat, btnClearCache,
+                btnForceRestartBrowser, btnOpenLogs, btnClearLog
             });
             splitContainer.Panel1.Controls.Add(buttonPanel);
 
@@ -237,7 +269,7 @@ namespace GeminiWebTranslator.Forms
             splitContainer.Panel2.Controls.Add(logGroup);
 
             this.Controls.Add(splitContainer);
-            
+
             // MainForm의 로그 이벤트 구독
             _mainForm.OnLogMessage += AppendLocalLog;
             this.FormClosed += (s, e) => _mainForm.OnLogMessage -= AppendLocalLog;
@@ -258,13 +290,13 @@ namespace GeminiWebTranslator.Forms
         private void AppendLocalLog(string message)
         {
             if (txtLog == null || txtLog.IsDisposed) return;
-            
+
             if (txtLog.InvokeRequired)
             {
                 txtLog.Invoke(() => AppendLocalLog(message));
                 return;
             }
-            
+
             txtLog.AppendText($"{message}\n");
             // 자동 스크롤 비활성화 - 사용자가 직접 스크롤 가능
         }

@@ -21,15 +21,15 @@ public partial class MainForm : Form
 {
     // 항상 위 모드를 다른 폼에서도 참조할 수 있도록 static 속성으로 노출
     public static bool IsAlwaysOnTop { get; set; } = false;
-    
+
     #region UI 컨트롤
 
-    
+
     // 텍스트 입력 및 출력 관련
     private TextBox txtInput = null!;
     private RichTextBox txtOutput = null!;
     private RichTextBox txtLog = null!;
-    
+
     // 설정 드롭다운들
     private ComboBox cmbTargetLang = null!;
     private ComboBox cmbStyle = null!;
@@ -41,29 +41,30 @@ public partial class MainForm : Form
     // 모드 선택 버튼
     private Button btnModeHttp = null!;
     private Button btnModeWebView = null!;
-    
+
     // 실행 및 제어 버튼
     private Button btnTranslate = null!;
     private Button btnClear = null!;
     private Button btnCopy = null!;
     private Button btnStop = null!;
     private Button btnReviewPrompt = null!;
-    
+
     // 파일 모드는 TranslationSettingsFormEx에 통합됨
-    
+
     // 상태 표시 요소
     private ProgressBar progressBar = null!;
     private Label lblProgress = null!;
-    
+
 
     #endregion
 
     #region 서비스 객체
     private GeminiHttpClient? httpClient;          // HTTP API 직접 호출 클라이언트
     private GeminiAutomation? automation;          // WebView2 기반 자동화 엔진
+    private GeminiGuestHttpClient? guestHttpClient; // WebView 캡처 기반 비로그인 HTTP 클라이언트
     private GeminiImageProcessor? imageProcessor;  // 이미지 처리 엔진 (NanoBanana 용)
     private readonly TranslationContext translationContext = new(); // 번역 문맥 관리 (프롬프트 구성)
-    
+
     // 비즈니스 로직 서비스
     private TranslationService translationService;   // 텍스트 번역 서비스
     private TsvTranslationService tsvService;        // TSV 파일 전용 번역 서비스
@@ -74,6 +75,7 @@ public partial class MainForm : Form
     private readonly string profileDir;   // 브라우저 프로필 저장 위치
     private readonly string cookiePath;   // 쿠키 설정 저장 위치
     private bool useWebView2Mode = false; // 현재 WebView2 모드 활성화 여부
+    private readonly Dictionary<string, CoreWebView2Environment> _webViewEnvironments = new(); // 프로필별 환경 저장
     #endregion
 
     // 파일 번역 모드 관련 변수
@@ -89,16 +91,16 @@ public partial class MainForm : Form
     private int lastTranslatedChunkIndex = -1;
     private List<string>? savedChunks;
     private List<string>? savedResults;
-    
+
     // TSV 번역 재개 상태
     private int lastBatchIndex = 0;
     private Dictionary<string, string>? savedTranslationResults;
     private List<(int LineIndex, string Id, string JpText)>? savedItemsToTranslate;
-    
+
     // 로그 이벤트 및 히스토리 (DebugForm 연동용)
     public event Action<string>? OnLogMessage;
     private readonly System.Text.StringBuilder _logHistory = new(8192);
-    
+
     // 번역 설정 및 용어집
     private TranslationSettings currentSettings = new();
     private string? loadedGlossaryPath;
@@ -127,16 +129,27 @@ public partial class MainForm : Form
             if (useWebView2Mode)
             {
                 if (automation == null) throw new Exception("WebView2가 초기화되지 않았습니다.");
+
+                if (SharedWebViewManager.Instance.UseGuestHttpMode)
+                {
+                    if (guestHttpClient == null)
+                    {
+                        guestHttpClient = new GeminiGuestHttpClient(webView, automation);
+                        guestHttpClient.OnLog += msg => AppendLog(msg);
+                    }
+                    return await guestHttpClient.GenerateAsync(prompt);
+                }
+
                 return await automation.GenerateContentAsync(prompt);
             }
-            
+
             // 2. HTTP 모드
             if (chkHttpMode.Checked && httpClient?.IsInitialized == true)
             {
                 httpClient.ResetSession();
                 return await httpClient.GenerateContentAsync(prompt);
             }
-            
+
             throw new Exception("번역 모드가 선택되지 않았습니다.\n\n다음 중 하나를 활성화해주세요:\n• HTTP 체크박스 + HTTP 설정 버튼\n• WebView 로그인 버튼");
         };
     }
@@ -147,24 +160,30 @@ public partial class MainForm : Form
         profileDir = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath) ?? "", "gemini_session");
         cookiePath = Path.Combine(profileDir, "gemini_cookies.json");
         if (!Directory.Exists(profileDir)) Directory.CreateDirectory(profileDir);
-        
+
         // 핵심 서비스 인스턴스 생성
         translationService = new TranslationService(translationContext);
         tsvService = new TsvTranslationService();
-        
+
         InitializeComponent();
 
         // 🚀 윈도우 로드 시 레이아웃 수동 보정 (WinForms 디자인 한계 극복용)
-        this.Load += (s, e) => {
+        this.Load += (s, e) =>
+        {
             // 모든 컨트롤에서 SplitContainer를 찾아 비율 조정
-            void AdjustSplitters(Control parent, int depth = 0) {
-                foreach (Control c in parent.Controls) {
-                    if (c is SplitContainer split) {
-                        if (split.Orientation == Orientation.Horizontal) {
+            void AdjustSplitters(Control parent, int depth = 0)
+            {
+                foreach (Control c in parent.Controls)
+                {
+                    if (c is SplitContainer split)
+                    {
+                        if (split.Orientation == Orientation.Horizontal)
+                        {
                             // 상단/하단 분할 (헤더/본문)
                             try { split.SplitterDistance = 110; } catch { }
                         }
-                        else if (split.Orientation == Orientation.Vertical && depth > 0) {
+                        else if (split.Orientation == Orientation.Vertical && depth > 0)
+                        {
                             // 입력/출력 좌우 분할 - 입력을 60%로 설정 (출력 40%)
                             try { split.SplitterDistance = (int)(split.Width * 0.60); } catch { }
                         }
@@ -188,13 +207,15 @@ public partial class MainForm : Form
         statusTimer = new System.Windows.Forms.Timer { Interval = 3000 };
         statusTimer.Tick += StatusTimer_Tick;
         statusTimer.Start();
-        
+
         // WebView Control Event Handlers
-        if (btnWebNewChat != null) btnWebNewChat.Click += (s, e) => {
+        if (btnWebNewChat != null) btnWebNewChat.Click += (s, e) =>
+        {
             if (webView != null && webView.CoreWebView2 != null) webView.CoreWebView2.Navigate("https://gemini.google.com/app");
         };
-        if (btnWebRefresh != null) btnWebRefresh.Click += (s, e) => {
-             if (webView != null && webView.CoreWebView2 != null) webView.CoreWebView2.Reload();
+        if (btnWebRefresh != null) btnWebRefresh.Click += (s, e) =>
+        {
+            if (webView != null && webView.CoreWebView2 != null) webView.CoreWebView2.Reload();
         };
     }
 
@@ -225,7 +246,7 @@ public partial class MainForm : Form
             {
                 UpdateSpecificStatus(pnlStatusHttp, lblStatusHttp, "HTTP (준비됨)", UiTheme.ColorSuccess);
             }
-            else if (File.Exists(cookiePath)) 
+            else if (File.Exists(cookiePath))
             {
                 UpdateSpecificStatus(pnlStatusHttp, lblStatusHttp, "HTTP (연결중..)", UiTheme.ColorWarning);
             }
@@ -239,8 +260,10 @@ public partial class MainForm : Form
             {
                 // 실제 진단 수행 (백그라운드에서 주기적으로)
                 var diag = await automation.DiagnoseAsync();
-                
-                string msg = "WebView";
+
+                var useGuestHttp = SharedWebViewManager.Instance.UseGuestHttpMode;
+                var modeLabel = useGuestHttp ? "WebView-HTTP" : "WebView";
+                string msg = modeLabel;
                 Color col = Color.Gray;
 
                 switch (diag.Status)
@@ -248,21 +271,21 @@ public partial class MainForm : Form
                     case WebViewStatus.Ready:
                         // 모델 정보 가져오기
                         var modelInfo = await automation.GetCurrentModelAsync();
-                        var modelDisplay = !string.IsNullOrEmpty(modelInfo.ModelVersion) 
-                            ? $"Gemini {modelInfo.ModelVersion}" 
+                        var modelDisplay = !string.IsNullOrEmpty(modelInfo.ModelVersion)
+                            ? $"Gemini {modelInfo.ModelVersion}"
                             : "Gemini";
-                        msg = $"WebView ({modelDisplay})"; 
-                        col = UiTheme.ColorSuccess; 
+                        msg = $"{modeLabel} ({modelDisplay})";
+                        col = UiTheme.ColorSuccess;
                         break;
-                    case WebViewStatus.Generating: msg = "WebView (생성중)"; col = UiTheme.ColorWarning; break;
-                    case WebViewStatus.Loading: msg = "WebView (로딩중)"; col = UiTheme.ColorPrimary; break;
-                    case WebViewStatus.WrongPage: msg = "WebView (페이지이동필요)"; col = UiTheme.ColorWarning; break;
-                    case WebViewStatus.LoginNeeded: msg = "WebView (로그인필요)"; col = UiTheme.ColorError; break;
-                    case WebViewStatus.Disconnected: msg = "WebView (연결끊김)"; col = UiTheme.ColorStatusOff; break;
-                    case WebViewStatus.NotInitialized: msg = "WebView (초기화중)"; col = UiTheme.ColorStatusOff; break;
+                    case WebViewStatus.Generating: msg = $"{modeLabel} (생성중)"; col = UiTheme.ColorWarning; break;
+                    case WebViewStatus.Loading: msg = $"{modeLabel} (로딩중)"; col = UiTheme.ColorPrimary; break;
+                    case WebViewStatus.WrongPage: msg = $"{modeLabel} (페이지이동필요)"; col = UiTheme.ColorWarning; break;
+                    case WebViewStatus.LoginNeeded: msg = $"{modeLabel} (로그인필요)"; col = UiTheme.ColorError; break;
+                    case WebViewStatus.Disconnected: msg = $"{modeLabel} (연결끊김)"; col = UiTheme.ColorStatusOff; break;
+                    case WebViewStatus.NotInitialized: msg = $"{modeLabel} (초기화중)"; col = UiTheme.ColorStatusOff; break;
                     case WebViewStatus.Error:
                     default:
-                        msg = string.IsNullOrEmpty(diag.ErrorMessage) ? "WebView (오류)" : $"WebView (오류: {diag.ErrorMessage})";
+                        msg = string.IsNullOrEmpty(diag.ErrorMessage) ? $"{modeLabel} (오류)" : $"{modeLabel} (오류: {diag.ErrorMessage})";
                         col = UiTheme.ColorError;
                         break;
                 }
@@ -280,7 +303,7 @@ public partial class MainForm : Form
     private void UpdateSpecificStatus(Panel? pnl, Label? lbl, string text, Color color)
     {
         if (pnl == null || lbl == null || IsDisposed) return;
-        
+
         if (lbl.InvokeRequired)
         {
             lbl.Invoke(() => UpdateSpecificStatus(pnl, lbl, text, color));
@@ -298,7 +321,7 @@ public partial class MainForm : Form
     private void UpdateStatus(string message, Color color)
     {
         AppendLog($"[시스템] {message}");
-        
+
         // 특정 모드가 지정되지 않은 일반 알림은 모든 상태 라벨에 보조적으로 표시하거나 로그로만 남김
         if (lblStatusHttp != null) { /* 필요 시 공통 상태 표시 로직 추가 */ }
     }
@@ -311,23 +334,23 @@ public partial class MainForm : Form
         try
         {
             var formattedMsg = $"[{DateTime.Now:HH:mm:ss}] {message}";
-            
+
             // 파일에 로그 저장
             LogService.Instance.Log(message, "MainForm");
-            
+
             // 히스토리에 저장
             _logHistory.AppendLine(formattedMsg);
-            
+
             // 이벤트 발생 (DebugForm 연동)
             OnLogMessage?.Invoke(formattedMsg);
-            
+
             // UI 상태 체크
             if (txtLog == null || IsDisposed || !IsHandleCreated) return;
-            
-            if (txtLog.InvokeRequired) 
-            { 
+
+            if (txtLog.InvokeRequired)
+            {
                 try { txtLog.Invoke(() => txtLog.AppendText(formattedMsg + "\r\n")); } catch { }
-                return; 
+                return;
             }
 
             // 텍스트 추가
@@ -341,7 +364,7 @@ public partial class MainForm : Form
     /// 로그 히스토리를 반환합니다. (DebugForm용)
     /// </summary>
     public string GetLogHistory() => _logHistory.ToString();
-    
+
     /// <summary>
     /// 로그를 모두 지웁니다.
     /// </summary>
@@ -367,7 +390,7 @@ public partial class MainForm : Form
     {
         return ShowBrowserTab();
     }
-    
+
     /// <summary>
     /// WebView 브라우저를 별도 창으로 엽니다.
     /// </summary>
@@ -378,7 +401,7 @@ public partial class MainForm : Form
         {
             InitializeWebView2Async();
         }
-        
+
         // 별도 브라우저 창 열기
         var browserForm = new Form
         {
@@ -387,7 +410,7 @@ public partial class MainForm : Form
             StartPosition = FormStartPosition.CenterScreen,
             BackColor = Color.FromArgb(20, 20, 22)
         };
-        
+
         // WebView를 임시로 이동
         if (webView != null)
         {
@@ -395,20 +418,20 @@ public partial class MainForm : Form
             webView.Parent = browserForm;
             webView.Dock = DockStyle.Fill;
         }
-        
+
         // 상단 컨트롤 패널
         var topPanel = new Panel { Dock = DockStyle.Top, Height = 45, BackColor = Color.FromArgb(30, 30, 35) };
         var btnNewChat = new Button { Text = "새 채팅", Width = 90, Height = 35, Location = new Point(10, 5), BackColor = Color.FromArgb(80, 200, 120), ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand };
         var btnRefresh = new Button { Text = "새로고침", Width = 90, Height = 35, Location = new Point(110, 5), BackColor = Color.FromArgb(60, 60, 70), ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand };
         var btnClose = new Button { Text = "닫기", Width = 80, Height = 35, Location = new Point(210, 5), BackColor = Color.FromArgb(180, 70, 70), ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand };
-        
+
         btnNewChat.Click += async (s, e) => { if (automation != null) await automation.StartNewChatAsync(); };
         btnRefresh.Click += (s, e) => { webView?.CoreWebView2?.Reload(); };
         btnClose.Click += (s, e) => { browserForm.Close(); };
-        
+
         topPanel.Controls.AddRange(new Control[] { btnNewChat, btnRefresh, btnClose });
         browserForm.Controls.Add(topPanel);
-        
+
         // 폼 닫힐 때 WebView를 MainForm으로 돌려놓기
         browserForm.FormClosing += (s, e) =>
         {
@@ -423,9 +446,50 @@ public partial class MainForm : Form
                 webView.SendToBack();
             }
         };
-        
+
         browserForm.Show();
         return browserForm;
+    }
+
+    /// <summary>
+    /// 특정 하위 프로필을 사용하는 별도 디버그 브라우저 창을 엽니다.
+    /// </summary>
+    /// <param name="profileSubDir">null이면 로그인(gemini_session), 문자열이면 하위폴더</param>
+    public async Task ShowDebugBrowserAsync(string? profileSubDir = null)
+    {
+        string fullPath = profileSubDir == null
+            ? profileDir
+            : Path.Combine(profileDir, profileSubDir);
+
+        AppendLog($"[Debug] 디버그 브라우저 요청: {fullPath}");
+
+        var debugForm = new Form
+        {
+            Text = $"🛠️ Debug Browser - {Path.GetFileName(fullPath)}",
+            Size = new Size(1100, 750),
+            StartPosition = FormStartPosition.CenterScreen
+        };
+
+        var debugWebView = new Microsoft.Web.WebView2.WinForms.WebView2 { Dock = DockStyle.Fill };
+        debugForm.Controls.Add(debugWebView);
+
+        try
+        {
+            if (!_webViewEnvironments.TryGetValue(fullPath, out var env))
+            {
+                env = await CoreWebView2Environment.CreateAsync(null, fullPath);
+                _webViewEnvironments[fullPath] = env;
+            }
+            await debugWebView.EnsureCoreWebView2Async(env);
+            debugWebView.CoreWebView2.Navigate("https://gemini.google.com/app");
+            debugForm.Show();
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"[Debug] [Error] 디버그 브라우저 열기 실패: {ex.Message}");
+            MessageBox.Show($"브라우저 초기화 실패: {ex.Message}");
+            debugForm.Dispose();
+        }
     }
 
     /// <summary>
@@ -434,12 +498,14 @@ public partial class MainForm : Form
     public async Task RestartWebViewAsync()
     {
         AppendLog("[WebView] 재시작 요청됨...");
-        
+
         try
         {
             // 1. 기존 automation 정리
             automation = null;
-            
+            guestHttpClient?.Dispose();
+            guestHttpClient = null;
+
             // 2. WebView 재초기화
             if (webView != null && webView.CoreWebView2 != null)
             {
@@ -448,10 +514,12 @@ public partial class MainForm : Form
                 await Task.Delay(500);
                 webView.CoreWebView2.Navigate("https://gemini.google.com/app");
                 await Task.Delay(2000);
-                
+
                 // 3. Automation 재생성
                 automation = new GeminiAutomation(webView);
-                
+                guestHttpClient = new GeminiGuestHttpClient(webView, automation);
+                guestHttpClient.OnLog += msg => AppendLog(msg);
+
                 AppendLog("[WebView] 재시작 완료");
                 UpdateStatus("WebView 재시작됨", Color.LightGreen);
             }
@@ -467,14 +535,14 @@ public partial class MainForm : Form
             throw;
         }
     }
-    
+
     /// <summary>
     /// 새 채팅을 시작합니다 (WebView 모드용)
     /// </summary>
     public async Task StartNewChatAsync()
     {
         AppendLog("[WebView] 새 채팅 시작 요청됨...");
-        
+
         try
         {
             if (automation != null)
@@ -488,7 +556,7 @@ public partial class MainForm : Form
                 // automation이 없으면 직접 스크립트 실행
                 var result = await webView.CoreWebView2.ExecuteScriptAsync(GeminiWebTranslator.Automation.GeminiScripts.NewChatScript);
                 AppendLog($"[WebView] 새 채팅 스크립트 결과: {result}");
-                
+
                 // 입력창 준비 대기
                 await Task.Delay(2000);
                 UpdateStatus("새 채팅 시작됨", Color.LightGreen);
@@ -511,102 +579,113 @@ public partial class MainForm : Form
     private async void InitializeWebView2Async()
     {
         if (webView == null) return;
-        
+
         try
         {
             // 이미 초기화된 경우
             if (webView.CoreWebView2 != null) return;
 
-            string webviewProfile = Path.Combine(profileDir, "webview");
+            // 로그인 모드에 따라 프로필 경로 선택
+            var useLogin = SharedWebViewManager.Instance.UseLoginMode;
+            string webviewProfile = useLogin
+                ? profileDir                              // 로그인: gemini_session/ (SharedWebViewManager와 동일)
+                : Path.Combine(profileDir, "webview");    // 비로그인: gemini_session/webview/
             UpdateStatus("WebView 초기화 중...", Color.Orange);
-            AppendLog("[WebView] 백그라운드 초기화 시작...");
+            AppendLog($"[WebView] 백그라운드 초기화 시작... (프로필: {(useLogin ? "로그인" : "비로그인")})");
 
-            var env = await CoreWebView2Environment.CreateAsync(null, webviewProfile);
+            if (!_webViewEnvironments.TryGetValue(webviewProfile, out var env))
+            {
+                env = await CoreWebView2Environment.CreateAsync(null, webviewProfile);
+                _webViewEnvironments[webviewProfile] = env;
+            }
             await webView.EnsureCoreWebView2Async(env);
-            
+
             if (webView.CoreWebView2 != null)
             {
                 webView.CoreWebView2.Settings.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
                 webView.CoreWebView2.Navigate("https://gemini.google.com/app");
 
-                
+
                 webView.NavigationCompleted += (s, args) =>
                 {
                     if (args.IsSuccess && webView.Source?.ToString().Contains("gemini.google.com") == true)
                     {
-                         UpdateStatus("[성공] WebView 준비 완료", Color.Green);
-                         AppendLog("[WebView] Gemini 로드 성공");
-                         
-                         // 자동화 객체 연결
-                         if (automation == null)
-                         {
-                             automation = new GeminiAutomation(webView);
-                             automation.OnLog += msg => AppendLog(msg);
-                             
-                             // 스트리밍 콜백 연결 - 실시간 번역 결과 표시
-                             automation.OnStreamingUpdate += partial =>
-                             {
-                                 if (txtOutput == null || txtOutput.IsDisposed) return;
-                                 
-                                 if (txtOutput.InvokeRequired)
-                                 {
-                                     txtOutput.BeginInvoke(() =>
-                                     {
-                                         txtOutput.Text = partial;
-                                         txtOutput.SelectionStart = txtOutput.TextLength;
-                                         txtOutput.ScrollToCaret();
-                                     });
-                                 }
-                                 else
-                                 {
-                                     txtOutput.Text = partial;
-                                     txtOutput.SelectionStart = txtOutput.TextLength;
-                                     txtOutput.ScrollToCaret();
-                                 }
-                             };
-                             
-                             // 모델 감지 콜백 연결 - 실시간 모델 정보 GUI 업데이트
-                             automation.OnModelDetected += modelInfo =>
-                             {
-                                 if (this.IsDisposed) return;
-                                 
-                                 var action = () =>
-                                 {
-                                     // 상태바 업데이트
-                                     var headerStatus = modelInfo.DetectionMethod == "header-id" 
-                                         ? "✓" : "?";
-                                     var displayText = $"[{headerStatus}] {modelInfo.ModelName} v{modelInfo.ModelVersion}";
-                                     
-                                     AppendLog($"[Model] 감지됨: {modelInfo.ModelName} (v{modelInfo.ModelVersion}) " +
-                                         $"[{modelInfo.DetectionMethod}] " +
-                                         $"Login={modelInfo.IsLoggedIn}");
-                                     
-                                     // 2.5 모델 경고
-                                     if (modelInfo.ModelVersion == "2.5")
-                                     {
-                                         AppendLog($"[Model] ⚠️ {modelInfo.ModelName}은 현재 Google에서 비활성 상태입니다.");
-                                     }
-                                     
-                                     // 모드 버튼 텍스트 업데이트
-                                     if (btnModeWebView != null && !btnModeWebView.IsDisposed)
-                                     {
-                                         var modeText = modelInfo.IsLoggedIn ? "로그인" : "비로그인";
-                                         btnModeWebView.Text = $"WebView ({modeText} v{modelInfo.ModelVersion})";
-                                     }
-                                 };
-                                 
-                                 if (this.InvokeRequired)
-                                     this.BeginInvoke(action);
-                                 else
-                                     action();
-                             };
-                             
-                             imageProcessor = new GeminiImageProcessor(webView);
-                             imageProcessor.OnLog += msg => AppendLog(msg);
-                         }
-                         
-                         useWebView2Mode = true;
-                         btnTranslate.Enabled = true;
+                        UpdateStatus("[성공] WebView 준비 완료", Color.Green);
+                        AppendLog("[WebView] Gemini 로드 성공");
+
+                        // 자동화 객체 연결
+                        if (automation == null)
+                        {
+                            automation = new GeminiAutomation(webView);
+                            automation.OnLog += msg => AppendLog(msg);
+                            guestHttpClient = new GeminiGuestHttpClient(webView, automation);
+                            guestHttpClient.OnLog += msg => AppendLog(msg);
+
+                            // 스트리밍 콜백 연결 - 실시간 번역 결과 표시
+                            automation.OnStreamingUpdate += partial =>
+                            {
+                                if (txtOutput == null || txtOutput.IsDisposed) return;
+
+                                if (txtOutput.InvokeRequired)
+                                {
+                                    txtOutput.BeginInvoke(() =>
+                                    {
+                                        txtOutput.Text = partial;
+                                        txtOutput.SelectionStart = txtOutput.TextLength;
+                                        txtOutput.ScrollToCaret();
+                                    });
+                                }
+                                else
+                                {
+                                    txtOutput.Text = partial;
+                                    txtOutput.SelectionStart = txtOutput.TextLength;
+                                    txtOutput.ScrollToCaret();
+                                }
+                            };
+
+                            // 모델 감지 콜백 연결 - 실시간 모델 정보 GUI 업데이트
+                            automation.OnModelDetected += modelInfo =>
+                            {
+                                if (this.IsDisposed) return;
+
+                                var action = () =>
+                                {
+                                    // 상태바 업데이트
+                                    var headerStatus = modelInfo.DetectionMethod == "header-id"
+                                        ? "✓" : "?";
+                                    var displayText = $"[{headerStatus}] {modelInfo.ModelName} v{modelInfo.ModelVersion}";
+
+                                    AppendLog($"[Model] 감지됨: {modelInfo.ModelName} (v{modelInfo.ModelVersion}) " +
+                                        $"[{modelInfo.DetectionMethod}] " +
+                                        $"Login={modelInfo.IsLoggedIn}");
+
+                                    // 2.5 모델 경고
+                                    if (modelInfo.ModelVersion == "2.5")
+                                    {
+                                        AppendLog($"[Model] ⚠️ {modelInfo.ModelName}은 현재 Google에서 비활성 상태입니다.");
+                                    }
+
+                                    // 모드 버튼 텍스트 업데이트
+                                    if (btnModeWebView != null && !btnModeWebView.IsDisposed)
+                                    {
+                                        var modeText = modelInfo.IsLoggedIn ? "로그인" : "비로그인";
+                                        var guestTag = SharedWebViewManager.Instance.UseGuestHttpMode ? " + HTTP" : "";
+                                        btnModeWebView.Text = $"WebView ({modeText}{guestTag} v{modelInfo.ModelVersion})";
+                                    }
+                                };
+
+                                if (this.InvokeRequired)
+                                    this.BeginInvoke(action);
+                                else
+                                    action();
+                            };
+
+                            imageProcessor = new GeminiImageProcessor(webView);
+                            imageProcessor.OnLog += msg => AppendLog(msg);
+                        }
+
+                        useWebView2Mode = true;
+                        btnTranslate.Enabled = true;
                     }
                 };
             }
@@ -616,7 +695,7 @@ public partial class MainForm : Form
             AppendLog($"[ERROR] WebView 초기화 실패: {ex.Message}");
             UpdateStatus("WebView 오류", Color.Red);
         }
-    }    
+    }
     /// <summary>
     /// HTTP API를 초기화 또는 재연결합니다.
     /// </summary>
@@ -629,7 +708,7 @@ public partial class MainForm : Form
             return;
         }
 
-        try 
+        try
         {
             httpClient = new GeminiHttpClient();
             httpClient.OnLog += msg => AppendLog(msg);
@@ -657,7 +736,7 @@ public partial class MainForm : Form
     {
         await InitializeHttpApiAsync();
     }
-    
+
     /// <summary>
     /// MainForm WebView에서 쿠키를 추출합니다. (HTTP 설정에서 사용)
     /// </summary>
@@ -669,19 +748,19 @@ public partial class MainForm : Form
             AppendLog("[쿠키추출] WebView가 초기화되지 않았습니다.");
             return (null, null, null);
         }
-        
+
         try
         {
             AppendLog("[쿠키추출] MainForm WebView에서 쿠키 추출 중...");
-            
+
             var cookieManager = webView.CoreWebView2.CookieManager;
             var cookies = await cookieManager.GetCookiesAsync("https://gemini.google.com");
-            
+
             AppendLog($"[쿠키추출] gemini.google.com에서 쿠키 {cookies.Count}개 발견");
-            
+
             string? psid = null;
             string? psidts = null;
-            
+
             foreach (var cookie in cookies)
             {
                 if (cookie.Name == "__Secure-1PSID" && string.IsNullOrEmpty(psid))
@@ -695,11 +774,11 @@ public partial class MainForm : Form
                     AppendLog("[쿠키추출] __Secure-1PSIDTS 발견");
                 }
             }
-            
+
             // User-Agent 추출
             var userAgent = await webView.CoreWebView2.ExecuteScriptAsync("navigator.userAgent");
             userAgent = userAgent?.Trim('"');
-            
+
             if (!string.IsNullOrEmpty(psid))
             {
                 AppendLog("[쿠키추출] 쿠키 추출 완료!");
@@ -708,7 +787,7 @@ public partial class MainForm : Form
             {
                 AppendLog("[쿠키추출] __Secure-1PSID를 찾을 수 없습니다. 로그인이 필요합니다.");
             }
-            
+
             return (psid, psidts, userAgent);
         }
         catch (Exception ex)
@@ -725,26 +804,28 @@ public partial class MainForm : Form
     public async Task ForceRestartBrowserServicesAsync()
     {
         AppendLog("[WARN] WebView 서비스 강제 재시작 시작...");
-        
+
         // 1. WebView 자동화 정리
         if (automation != null)
         {
             AppendLog("[INFO] GeminiAutomation 정리 중...");
             automation = null;
         }
+        guestHttpClient?.Dispose();
+        guestHttpClient = null;
 
         // 2. WebView 정리
         if (webView != null && webView.CoreWebView2 != null)
         {
-             // WebView2 컨트롤은 Dispose하기보다 페이지를 새로고침하는 것이 안전함
-             try { webView.Reload(); } catch {}
+            // WebView2 컨트롤은 Dispose하기보다 페이지를 새로고침하는 것이 안전함
+            try { webView.Reload(); } catch { }
         }
 
         // 3. 상태 초기화
         useWebView2Mode = false;
         UpdateStatus("🔄 WebView 서비스 재시작됨 - 모드 재선택 필요", UiTheme.ColorWarning);
         UpdateModeButtonsUI(null); // 모든 강조 해제
-        
+
         // 버튼 상태 복구
         if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
         AppendLog("[SUCCESS] WebView 서비스 강제 재시작 완료");
@@ -760,17 +841,17 @@ public partial class MainForm : Form
         // 기본 색상 정의
         if (btnModeHttp != null) btnModeHttp.BackColor = (btnModeHttp == activeButton) ? UiTheme.ColorPrimary : UiTheme.ColorSurfaceLight;
         if (btnModeWebView != null) btnModeWebView.BackColor = (btnModeWebView == activeButton) ? UiTheme.ColorPrimary : UiTheme.ColorSurfaceLight;
-        
+
         // 선택된 버튼 텍스트 두껍게 (선택 사항)
         if (btnModeHttp != null) btnModeHttp.Font = new Font(btnModeHttp.Font, btnModeHttp == activeButton ? FontStyle.Bold : FontStyle.Regular);
         if (btnModeWebView != null) btnModeWebView.Font = new Font(btnModeWebView.Font, btnModeWebView == activeButton ? FontStyle.Bold : FontStyle.Regular);
     }
-    
+
     // 설정 화면 폼 인스턴스들
     private Forms.HttpSettingsForm? _httpSettingsForm;
-    
 
-    
+
+
     /// <summary>
     /// HTTP 모드 체크박스 변경 시 호출 - HTTP 설정 버튼 활성화/비활성화 및 초기화를 처리합니다.
     /// </summary>
@@ -783,7 +864,7 @@ public partial class MainForm : Form
             btnModeHttp.BackColor = UiTheme.ColorPrimary;
             btnModeHttp.ForeColor = Color.White;
             AppendLog("[HTTP] HTTP 모드 활성화됨 - 설정 버튼 사용 가능");
-            
+
             // 쿠키 파일이 존재하면 자동으로 HTTP API 초기화 시도
             if (File.Exists(cookiePath))
             {
@@ -797,11 +878,11 @@ public partial class MainForm : Form
             btnModeHttp.BackColor = Color.FromArgb(60, 60, 70);
             btnModeHttp.ForeColor = Color.Gray;
             AppendLog("[HTTP] HTTP 모드 비활성화됨");
-            
+
             // HTTP 클라이언트 정리
             httpClient?.Dispose();
             httpClient = null;
-            
+
             // HTTP 모드가 꺼지면 버튼 UI 강조 해제
             UpdateModeButtonsUI(null);
         }
@@ -814,7 +895,7 @@ public partial class MainForm : Form
     {
         ShowHttpSettingsForm();
     }
-    
+
     /// <summary>
     /// HTTP 모드 설정 화면 표시
     /// </summary>
@@ -823,7 +904,7 @@ public partial class MainForm : Form
         useWebView2Mode = false;
         UpdateModeButtonsUI(btnModeHttp);
         if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
-        
+
         _httpSettingsForm ??= new Forms.HttpSettingsForm(cookiePath, profileDir);
         _httpSettingsForm.OnLog += msg => AppendLog(msg);
         _httpSettingsForm.OnCookiesUpdated += async (cookies, userAgent) =>
@@ -841,7 +922,7 @@ public partial class MainForm : Form
                 {
                     btnModeHttp.Text = "HTTP (로그인)";
                 }
-                
+
                 UpdateStatus("🔐 HTTP API 준비됨 (로그인)", System.Drawing.Color.Green);
                 btnTranslate.Enabled = true;
             }
@@ -864,7 +945,7 @@ public partial class MainForm : Form
     /// [WebView 모드] 버튼 클릭 시 호출 - WebView 설정 창을 엽니다.
     /// </summary>
     private Forms.WebViewSettingsForm? _webViewSettingsForm;
-    
+
     private async void BtnModeWebView_Click(object? sender, EventArgs e)
     {
         try
@@ -875,34 +956,59 @@ public partial class MainForm : Form
                 _webViewSettingsForm.BringToFront();
                 return;
             }
-            
+
             // WebView 설정 창 열기
             _webViewSettingsForm = new Forms.WebViewSettingsForm(profileDir);
             _webViewSettingsForm.OnLog += msg => AppendLog(msg);
-            _webViewSettingsForm.OnModeChanged += (useLoginMode) =>
+            _webViewSettingsForm.OnModeChanged += (useLoginMode, useGuestHttp) =>
             {
                 useWebView2Mode = true;
                 UpdateModeButtonsUI(btnModeWebView);
                 if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
-                
+
                 // 버튼 텍스트 업데이트 (현재 모드 표시)
                 var modeText = useLoginMode ? "로그인" : "비로그인";
+                var guestTag = useGuestHttp ? " + HTTP" : "";
                 if (btnModeWebView != null)
                 {
                     // 모델: 로그인/비로그인 모두 현재 3.0
-                    btnModeWebView.Text = $"WebView ({modeText} Gemini 3.0)";
+                    btnModeWebView.Text = $"WebView ({modeText}{guestTag} Gemini 3.0)";
                 }
-                
-                UpdateStatus($"WebView {modeText} 모드 활성화됨", Color.Green);
-                AppendLog($"[WebView] 모드 변경: {modeText}");
-                
-                // WebView2 초기화
+
+                UpdateStatus($"WebView {modeText}{guestTag} 모드 활성화됨", Color.Green);
+                AppendLog($"[WebView] 모드 변경: {modeText}{guestTag}");
+
+                // WebView2 초기화 (모드 변경 시 프로필 전환 필요)
                 if (webView == null || webView.CoreWebView2 == null)
                 {
                     InitializeWebView2Async();
                 }
+                else
+                {
+                    // WebView2는 이미 초기화된 컨트롤에서 프로필 변경 불가
+                    // → 기존 WebView를 폐기하고 새로 생성
+                    AppendLog($"[WebView] 모드 변경으로 인한 WebView 재생성...");
+                    automation = null;
+                    guestHttpClient?.Dispose();
+                    guestHttpClient = null;
+
+                    var parent = webView.Parent;
+                    var dock = webView.Dock;
+                    var visible = webView.Visible;
+                    parent?.Controls.Remove(webView);
+                    webView.Dispose();
+
+                    webView = new Microsoft.Web.WebView2.WinForms.WebView2
+                    {
+                        Dock = dock,
+                        Visible = visible
+                    };
+                    parent?.Controls.Add(webView);
+
+                    InitializeWebView2Async();
+                }
             };
-            
+
             // 독립 창으로 표시 (비모달)
             _webViewSettingsForm.Show();
             _webViewSettingsForm.BringToFront();
@@ -913,8 +1019,8 @@ public partial class MainForm : Form
         }
     }
 
-    
-    
+
+
     /// <summary>
     /// [프롬프트 검토] 버튼 클릭 시 호출 - 실제로 AI에게 전송될 프롬프트 전문을 미리 보여줍니다.
     /// </summary>
@@ -922,13 +1028,13 @@ public partial class MainForm : Form
     {
         var text = txtInput.Text?.Trim();
         if (string.IsNullOrEmpty(text)) text = "(예시 텍스트입니다. 실제 번역 시 입력한 내용이 들어갑니다.)";
-        
+
         var targetLang = cmbTargetLang.SelectedItem?.ToString()?.Split('(')[0].Trim() ?? "한국어";
         var style = cmbStyle.SelectedItem?.ToString() ?? "자연스럽게";
-        
+
         // 현재 설정으로 프롬프트 생성
         var prompt = translationContext.BuildContextualPrompt(text, targetLang, style, useVisualHistory: useWebView2Mode);
-        
+
         // 결과 미리보기용 다이얼로그 생성
         using (var pf = new Form())
         {
@@ -936,23 +1042,24 @@ public partial class MainForm : Form
             pf.Size = new Size(700, 600);
             pf.StartPosition = FormStartPosition.CenterParent;
             pf.BackColor = Color.FromArgb(30, 30, 30);
-            
-            var box = new RichTextBox { 
-                Dock = DockStyle.Fill, 
-                ReadOnly = true, 
-                Font = new Font("Consolas", 11), 
+
+            var box = new RichTextBox
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                Font = new Font("Consolas", 11),
                 BackColor = Color.FromArgb(30, 30, 30),
                 ForeColor = Color.FromArgb(220, 220, 220),
-                Text = prompt, 
+                Text = prompt,
                 BorderStyle = BorderStyle.None,
                 Padding = new Padding(10)
             };
-            
+
             pf.Controls.Add(box);
             pf.ShowDialog(this);
         }
     }
-    
+
     /// <summary>
     /// 통합 설정 버튼 클릭 - TranslationSettingsFormEx 열기 (파일 모드 + 단어장 편집 통합)
     /// </summary>
@@ -965,13 +1072,13 @@ public partial class MainForm : Form
                 // 설정 적용
                 currentSettings = settingsForm.Settings;
                 loadedGlossaryPath = settingsForm.GlossaryPath;
-                
+
                 // 언어 업데이트
                 SelectComboItem(cmbTargetLang, settingsForm.TargetLanguage);
-                
+
                 // 스타일 업데이트
                 SelectComboItem(cmbStyle, settingsForm.TranslationStyle);
-                
+
                 // 커스텀 프롬프트 업데이트
                 if (settingsForm.UseCustomPrompt)
                 {
@@ -984,14 +1091,19 @@ public partial class MainForm : Form
                     CustomTranslationPrompt = null;
                     UpdateSettingsStatusUI();
                 }
-                
+
                 // 파일 모드 통합 처리
                 if (!string.IsNullOrEmpty(settingsForm.LoadedFilePath) && !string.IsNullOrEmpty(settingsForm.LoadedFileContent))
                 {
                     loadedFilePath = settingsForm.LoadedFilePath;
                     isFileMode = true;
                     txtInput.ReadOnly = true;
-                    
+
+                    // 파일 전환 시 이전 상태 초기화 (Bug 7)
+                    savedTranslationResults = null;
+                    savedItemsToTranslate = null;
+                    lastBatchIndex = 0;
+
                     var ext = Path.GetExtension(loadedFilePath).ToLower();
                     if (ext == ".json")
                     {
@@ -1001,7 +1113,10 @@ public partial class MainForm : Form
                     }
                     else if (ext == ".tsv")
                     {
-                        loadedTsvLines = settingsForm.LoadedFileContent.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).ToList();
+                        loadedTsvLines = settingsForm.LoadedFileContent.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None).ToList();
+                        if (loadedTsvLines.Count > 0 && string.IsNullOrEmpty(loadedTsvLines.Last()))
+                            loadedTsvLines.RemoveAt(loadedTsvLines.Count - 1);
+
                         loadedJsonData = null;
                         txtInput.Text = $"[파일 모드] TSV ({loadedTsvLines.Count}행)\n'번역하기' 클릭";
                     }
@@ -1012,7 +1127,7 @@ public partial class MainForm : Form
                         isFileMode = false;
                         txtInput.ReadOnly = false;
                     }
-                    
+
                     AppendLog($"[설정] 파일 로드됨: {Path.GetFileName(settingsForm.LoadedFilePath)}");
                 }
                 else
@@ -1024,22 +1139,28 @@ public partial class MainForm : Form
                         loadedFilePath = null;
                         loadedJsonData = null;
                         loadedTsvLines = null;
+
+                        // 상태 초기화 (Bug 7)
+                        savedTranslationResults = null;
+                        savedItemsToTranslate = null;
+                        lastBatchIndex = 0;
+
                         txtInput.Clear();
                         txtInput.ReadOnly = false;
                     }
                 }
-                
+
                 // 단어장 로그
                 if (currentSettings.Glossary.Count > 0)
                 {
                     AppendLog($"[설정] 단어장: {currentSettings.Glossary.Count}개");
                 }
-                
+
                 UpdateStatus("[성공] 설정이 적용되었습니다.", Color.LightGreen);
             }
         }
     }
-    
+
     /// <summary>
     /// 콤보박스 아이템 선택 헬퍼
     /// </summary>
@@ -1054,21 +1175,21 @@ public partial class MainForm : Form
             }
         }
     }
-    
+
     /// <summary>
     /// 설정 상태 UI 업데이트
     /// </summary>
     private void UpdateSettingsStatusUI()
     {
         if (lblSettingsStatus == null) return;
-        
+
         var parts = new List<string>();
-        
+
         if (!string.IsNullOrWhiteSpace(CustomTranslationPrompt))
             parts.Add("프롬프트");
         if (currentSettings.Glossary.Count > 0)
             parts.Add($"단어장({currentSettings.Glossary.Count})");
-        
+
         if (parts.Count > 0)
         {
             lblSettingsStatus.Text = string.Join(", ", parts);
@@ -1090,31 +1211,31 @@ public partial class MainForm : Form
                 "번역 진행 중",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning);
-            
+
             if (result != DialogResult.Yes)
             {
                 return;
             }
-            
+
             // 번역 중단
             translationCancellation?.Cancel();
             AppendLog("[번역] NanoBanana 실행을 위해 번역을 중단합니다.");
         }
-        
+
         // NanoBanana 안내 메시지 표시
         AppendLog("[NanoBanana] WebView2 기반 이미지 처리를 시작합니다.");
-        
+
         SetMainModesEnabled(false);
 
         // NanoBanana 폼 생성 (WebView2 모드)
         _nanoBananaForm = new NanoBananaMainForm(null, null);
-        
+
         _nanoBananaForm.FormClosed += (ss, ee) =>
         {
             _nanoBananaForm = null;
             SetMainModesEnabled(true); // NanoBanana 종료 시 제약 해제
         };
-        
+
         _nanoBananaForm.Show();
 
         await Task.CompletedTask;
@@ -1133,6 +1254,7 @@ public partial class MainForm : Form
 
         // 3. HTTP 클라이언트 정리
         httpClient?.Dispose();
+        guestHttpClient?.Dispose();
 
         base.OnFormClosing(e);
     }
@@ -1143,7 +1265,7 @@ public partial class MainForm : Form
     private void SetMainModesEnabled(bool enabled)
     {
         if (btnModeHttp != null) btnModeHttp.Enabled = enabled;
-        
+
         if (!enabled)
         {
             AppendLog("[알림] NanoBanana 실행 중에는 WebView 번역 모드만 사용 가능합니다.");

@@ -3,6 +3,7 @@ using System;
 using System.Drawing;
 using System.Windows.Forms;
 using GeminiWebTranslator.Services;
+using GeminiWebTranslator.Controls;
 
 namespace GeminiWebTranslator.Forms;
 
@@ -15,28 +16,31 @@ public class WebViewSettingsForm : Form
     // UI 컨트롤
     private RadioButton? rdoNonLogin;
     private RadioButton? rdoLogin;
-    private Button? btnLaunchLogin;
-    private Button? btnResetSession;
-    private Button? btnApply;
+    private CheckBox? chkGuestHttp;
+    private ModernButton? btnLaunchLogin;
+    private ModernButton? btnResetSession;
+    private ModernButton? btnApply;
     private Label? lblStatus;
     private Label? lblSessionInfo;
     
     // 상태
     private readonly string _profileDir;
     private bool _useLoginMode = false; // 기본값: 비로그인 모드
+    private bool _useGuestHttpMode = false;
     
     // 이벤트
     public event Action<string>? OnLog;
-    public event Action<bool>? OnModeChanged; // true = 로그인 모드, false = 비로그인 모드
+    public event Action<bool, bool>? OnModeChanged; // (loginMode, guestHttpMode)
 
     public bool UseLoginMode => _useLoginMode;
+    public bool UseGuestHttpMode => _useGuestHttpMode;
     
     public WebViewSettingsForm(string profileDir)
     {
         _profileDir = profileDir;
         
         this.Text = "WebView 모드 설정";
-        this.Size = new Size(500, 400);
+        this.Size = new Size(500, 480);
         this.MinimizeBox = false;
         this.MaximizeBox = false;
         this.FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -49,13 +53,13 @@ public class WebViewSettingsForm : Form
     
     private void InitializeComponents()
     {
-        var mainPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(25) };
+        var mainPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(30) };
         
         // 제목
         var lblTitle = new Label
         {
             Text = "WebView 모드 설정",
-            Font = new Font("Segoe UI Variable Display", 16, FontStyle.Bold),
+            Font = new Font("Segoe UI Variable Display", 18, FontStyle.Bold),
             ForeColor = UiTheme.ColorPrimary,
             Location = new Point(25, 20),
             AutoSize = true
@@ -65,18 +69,18 @@ public class WebViewSettingsForm : Form
         var lblDesc = new Label
         {
             Text = "Gemini 사용을 위한 WebView2 모드를 선택하세요.",
-            Location = new Point(25, 55),
+            Location = new Point(28, 60),
             ForeColor = UiTheme.ColorTextMuted,
             AutoSize = true,
             Font = new Font("Segoe UI", 9.5f)
         };
         
         // 모드 선택 그룹
-        var grpMode = new GroupBox
+        var grpMode = new ModernGroupBox
         {
             Text = " 모드 선택 ",
-            Location = new Point(25, 90),
-            Size = new Size(435, 130),
+            Location = new Point(25, 100),
+            Size = new Size(435, 180),
             ForeColor = UiTheme.ColorPrimary,
             Font = new Font("Segoe UI Semibold", 9)
         };
@@ -84,7 +88,7 @@ public class WebViewSettingsForm : Form
         rdoNonLogin = new RadioButton
         {
             Text = "비로그인 모드 (익명)",
-            Location = new Point(20, 30),
+            Location = new Point(20, 35),
             AutoSize = true,
             ForeColor = UiTheme.ColorText,
             Font = new Font("Segoe UI", 10),
@@ -94,7 +98,7 @@ public class WebViewSettingsForm : Form
         var lblNonLoginDesc = new Label
         {
             Text = "로그인 없이 사용 / 일부 기능 제한 (이미지 생성 불가)",
-            Location = new Point(40, 52),
+            Location = new Point(40, 60),
             AutoSize = true,
             ForeColor = UiTheme.ColorTextMuted,
             Font = new Font("Segoe UI", 8.5f)
@@ -103,65 +107,77 @@ public class WebViewSettingsForm : Form
         rdoLogin = new RadioButton
         {
             Text = "로그인 모드 (Google 계정)",
-            Location = new Point(20, 80),
+            Location = new Point(20, 90),
             AutoSize = true,
             ForeColor = UiTheme.ColorText,
             Font = new Font("Segoe UI", 10)
         };
-        
+
         var lblLoginDesc = new Label
         {
             Text = "Google 계정으로 로그인 / 모든 기능 사용 가능",
-            Location = new Point(40, 102),
+            Location = new Point(40, 115),
             AutoSize = true,
             ForeColor = UiTheme.ColorTextMuted,
             Font = new Font("Segoe UI", 8.5f)
         };
+
+        chkGuestHttp = new CheckBox
+        {
+            Text = "비로그인 HTTP 캡처 사용",
+            Location = new Point(40, 140),
+            AutoSize = true,
+            ForeColor = UiTheme.ColorText,
+            Font = new Font("Segoe UI", 9f)
+        };
+
+        var lblGuestHttpDesc = new Label
+        {
+            Text = "WebView 요청 캡처 후 쿠키 없이 재전송 (불안정/실험)",
+            Location = new Point(220, 142),
+            AutoSize = true,
+            ForeColor = UiTheme.ColorTextMuted,
+            Font = new Font("Segoe UI", 8.2f)
+        };
         
-        grpMode.Controls.AddRange(new Control[] { rdoNonLogin, lblNonLoginDesc, rdoLogin, lblLoginDesc });
+        grpMode.Controls.AddRange(new Control[] { rdoNonLogin, lblNonLoginDesc, rdoLogin, lblLoginDesc, chkGuestHttp, lblGuestHttpDesc });
         
         // 로그인 관리 그룹
-        var grpLogin = new GroupBox
+        var grpLogin = new ModernGroupBox
         {
             Text = " 로그인 관리 ",
-            Location = new Point(25, 230),
-            Size = new Size(435, 85),
+            Location = new Point(25, 295),
+            Size = new Size(435, 90),
             ForeColor = Color.FromArgb(200, 200, 200),
             Font = new Font("Segoe UI Semibold", 9)
         };
         
-        btnLaunchLogin = new Button
+        btnLaunchLogin = new ModernButton
         {
             Text = "🚀 로그인 창 열기",
             Location = new Point(20, 30),
-            Size = new Size(130, 40),
+            Size = new Size(140, 40),
             BackColor = UiTheme.ColorSuccess,
             ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI", 9f, FontStyle.Bold),
-            Cursor = Cursors.Hand
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold)
         };
-        btnLaunchLogin.FlatAppearance.BorderSize = 0;
         btnLaunchLogin.Click += BtnLaunchLogin_Click;
         
-        btnResetSession = new Button
+        btnResetSession = new ModernButton
         {
             Text = "🔄 세션 초기화",
-            Location = new Point(160, 30),
-            Size = new Size(110, 40),
+            Location = new Point(170, 30),
+            Size = new Size(120, 40),
             BackColor = UiTheme.ColorSurfaceLight,
-            ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI", 9f),
-            Cursor = Cursors.Hand
+            ForeColor = UiTheme.ColorText,
+            Font = new Font("Segoe UI", 9f)
         };
-        btnResetSession.FlatAppearance.BorderSize = 0;
         btnResetSession.Click += BtnResetSession_Click;
         
         lblSessionInfo = new Label
         {
             Text = "",
-            Location = new Point(280, 40),
+            Location = new Point(300, 42),
             AutoSize = true,
             ForeColor = UiTheme.ColorTextMuted,
             Font = new Font("Segoe UI", 8.5f)
@@ -173,25 +189,22 @@ public class WebViewSettingsForm : Form
         lblStatus = new Label
         {
             Text = "",
-            Location = new Point(25, 325),
+            Location = new Point(25, 400),
             AutoSize = true,
             ForeColor = UiTheme.ColorWarning,
             Font = new Font("Segoe UI", 9)
         };
         
         // 적용 버튼
-        btnApply = new Button
+        btnApply = new ModernButton
         {
             Text = "✓ 적용",
-            Location = new Point(365, 320),
+            Location = new Point(365, 395),
             Size = new Size(95, 40),
             BackColor = UiTheme.ColorPrimary,
             ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI Semibold", 10),
-            Cursor = Cursors.Hand
+            Font = new Font("Segoe UI Semibold", 10)
         };
-        btnApply.FlatAppearance.BorderSize = 0;
         btnApply.Click += BtnApply_Click;
         
         mainPanel.Controls.AddRange(new Control[] { lblTitle, lblDesc, grpMode, grpLogin, lblStatus, btnApply });
@@ -200,6 +213,7 @@ public class WebViewSettingsForm : Form
         // 라디오 버튼 변경 이벤트
         rdoLogin.CheckedChanged += (s, e) => UpdateUIState();
         rdoNonLogin.CheckedChanged += (s, e) => UpdateUIState();
+        if (chkGuestHttp != null) chkGuestHttp.CheckedChanged += (s, e) => UpdateUIState();
     }
     
     private void LoadCurrentState()
@@ -207,9 +221,11 @@ public class WebViewSettingsForm : Form
         // SharedWebViewManager의 현재 상태 확인
         var manager = SharedWebViewManager.Instance;
         _useLoginMode = manager.UseLoginMode;
+        _useGuestHttpMode = manager.UseGuestHttpMode;
         
         if (rdoLogin != null) rdoLogin.Checked = _useLoginMode;
         if (rdoNonLogin != null) rdoNonLogin.Checked = !_useLoginMode;
+        if (chkGuestHttp != null) chkGuestHttp.Checked = _useGuestHttpMode;
         
         UpdateUIState();
         UpdateSessionInfo();
@@ -222,6 +238,13 @@ public class WebViewSettingsForm : Form
         // 로그인 관련 버튼은 로그인 모드일 때만 활성화
         if (btnLaunchLogin != null) btnLaunchLogin.Enabled = loginMode;
         if (btnResetSession != null) btnResetSession.Enabled = loginMode;
+
+        // 비로그인 HTTP 캡처는 비로그인 모드에서만 허용
+        if (chkGuestHttp != null)
+        {
+            chkGuestHttp.Enabled = !loginMode;
+            if (loginMode) chkGuestHttp.Checked = false;
+        }
     }
     
     private async void UpdateSessionInfo()
@@ -266,7 +289,8 @@ public class WebViewSettingsForm : Form
                     if (!manager.UseLoginMode)
                     {
                         // 비로그인도 현재 Gemini 3.0 Flash
-                        lblSessionInfo.Text = "✓ 준비됨 (비로그인 - Gemini 3.0)";
+                        var guestSuffix = manager.UseGuestHttpMode ? " / HTTP 캡처" : "";
+                        lblSessionInfo.Text = $"✓ 준비됨 (비로그인 - Gemini 3.0{guestSuffix})";
                         lblSessionInfo.ForeColor = UiTheme.ColorSuccess;
                     }
                     else
@@ -394,12 +418,15 @@ public class WebViewSettingsForm : Form
     private void BtnApply_Click(object? sender, EventArgs e)
     {
         _useLoginMode = rdoLogin?.Checked ?? true;
+        _useGuestHttpMode = chkGuestHttp?.Checked ?? false;
         
         // SharedWebViewManager에 모드 설정
         SharedWebViewManager.Instance.UseLoginMode = _useLoginMode;
+        SharedWebViewManager.Instance.UseGuestHttpMode = _useGuestHttpMode;
         
-        OnModeChanged?.Invoke(_useLoginMode);
-        OnLog?.Invoke($"[WebView] 모드 변경: {(_useLoginMode ? "로그인" : "비로그인")}");
+        OnModeChanged?.Invoke(_useLoginMode, _useGuestHttpMode);
+        var guestTag = _useGuestHttpMode ? " + HTTP 캡처" : "";
+        OnLog?.Invoke($"[WebView] 모드 변경: {(_useLoginMode ? "로그인" : "비로그인")}{guestTag}");
         
         this.DialogResult = DialogResult.OK;
         this.Close();

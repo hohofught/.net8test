@@ -135,7 +135,7 @@ public class TranslationContext
         if (currentIndex == 0) return true;
 
         // 연속 오류 발생 시 새 채팅 (문제 해결 시도)
-        if (ConsecutiveErrorCount >= 2) 
+        if (ConsecutiveErrorCount >= 2)
         {
             ConsecutiveErrorCount = 0; // 리셋
             return true;
@@ -175,12 +175,12 @@ public class TranslationContext
     /// <summary>
     /// 최적 청크 크기 계산
     /// </summary>
-    public int GetOptimalChunkSize()
+    public int GetOptimalChunkSize(bool isWebViewMode = false)
     {
-        // 응답 시간이 느리면 청크 크기 감소
-        if (AverageResponseTimeMs > 5000) return 3000;
-        if (AverageResponseTimeMs > 3000) return 4000;
-        return 5000; // 기본값
+        int baseLimit = isWebViewMode ? 2900 : 5900;
+        if (AverageResponseTimeMs > 5000) return (int)(baseLimit * 0.6);
+        if (AverageResponseTimeMs > 3000) return (int)(baseLimit * 0.8);
+        return baseLimit;
     }
 
     /// <summary>
@@ -195,7 +195,7 @@ public class TranslationContext
         // 중앙 관리 서비스(PromptService)를 사용하여 고도화된 프롬프트 생성
         // useVisualHistory가 true인 경우(WebView) 이전 텍스트를 중복 포함하지 않음
         var contextGlossary = Glossary.ToDictionary(k => k.Key, v => v.Value);
-        
+
         string? previousContext = null;
         if (!useVisualHistory && _previousChunks.Count > 0)
         {

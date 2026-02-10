@@ -1,34 +1,67 @@
-# .NET Core / C#
+# Build artifacts
 [Bb]in/
 [Oo]bj/
-*.user
-*.userosscache
-*.sln.docstates
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+TestResults/
 
-# Visual Studio
+# .NET / Visual Studio user files
 .vs/
 *.suo
 *.user
 *.userosscache
 *.sln.docstates
+*.rsuser
 *.pdb
 *.orig
+*.cache
+*.ilk
+*.tlog
+*.lastcodeanalysissucceeded
 
-# VS Code
+# Rider / VS Code
+.idea/
 .vscode/
 
-# Project Specific Exclusions
+# NuGet
+packages/
+*.nupkg
+*.snupkg
+project.assets.json
+project.nuget.cache
+
+# Logs and OS files
+*.log
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Project local runtime/browser data
 /chrome_bin/
 /edge_profile/
 /TopSecretProfile/
 /gemini_cookies.json
 /chrome_download.zip
 
-# OCR DLLs - 자동 추출되므로 Git에 포함하지 않음
-# (Windows ScreenSketch 또는 Photos 앱에서 자동 추출)
+# OCR DLLs (auto-extracted locally)
 Resources/OCR/*.dll
 Resources/OCR/*.onemodel
 
-# Others
-*.log
-.DS_Store
+# Local notes/reports (non-project docs)
+/.gemini/
+/GeminiWebTranslator_*.md
+/qjsdur_*.md
+/safe_mode.txt
+
+# Local configs and deployment test workspace
+*.csproj.user
+/배포테스트/
+
+# Local glossary/generated data
+/단어장/

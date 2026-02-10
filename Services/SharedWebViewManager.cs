@@ -63,6 +63,9 @@ namespace GeminiWebTranslator.Services
         
         /// <summary>로그인 모드 사용 여부 (호환성 유지용, 이제 항상 true와 유사하게 작동)</summary>
         public bool UseLoginMode { get; set; } = true;
+
+        /// <summary>비로그인 HTTP 캡처 모드 사용 여부 (WebView 요청 캡처 후 쿠키 없이 재전송)</summary>
+        public bool UseGuestHttpMode { get; set; } = false;
         
         public SharedWebViewManager() { }
         

@@ -14,49 +14,74 @@ namespace GeminiWebTranslator.Services
         /// <summary>
         /// 번역 모드에 따른 페르소나 및 기본 지침을 생성합니다.
         /// </summary>
-        public static string BuildTranslationPrompt(string text, string targetLang, string style, 
-            Dictionary<string, string>? glossary = null, 
-            string? gameName = null, 
+        public static string BuildTranslationPrompt(string text, string targetLang, string style,
+            Dictionary<string, string>? glossary = null,
+            string? gameName = null,
             string? customInstructions = null,
             string? previousContext = null)
         {
             var sb = new StringBuilder();
+            bool isTsvMode = !string.IsNullOrEmpty(customInstructions) && customInstructions.Contains("TSV");
 
-            // 1. 핵심 지침 (간결화) + 목표 언어
-            sb.AppendLine($"번역 지침: {targetLang}로 자연스러운 구어체 번역, 로봇 말투/과잉 존칭 금지, 원어민처럼 자연스럽게.");
-            
-            // 2. 커스텀 지침 (가장 우선)
-            if (!string.IsNullOrEmpty(customInstructions)) 
-                sb.AppendLine($"[커스텀] {customInstructions}");
-
-            // 3. 게임/작품 컨텍스트
-            if (!string.IsNullOrEmpty(gameName)) 
-                sb.AppendLine($"[작품] {gameName}");
-
-            // 4. 스타일 힌트 (한 줄)
-            sb.AppendLine($"[스타일] {style}");
-
-            // 5. 단어장 (있으면)
-            if (glossary != null && glossary.Count > 0)
+            if (isTsvMode)
             {
-                sb.Append("[단어장] ");
-                sb.AppendLine(string.Join(", ", glossary.Take(20).Select(e => $"{e.Key}→{e.Value}")));
-            }
+                // === TSV 배치 번역 전용 최적화 프롬프트 ===
+                // 시스템 지침 (1줄 압축)
+                sb.AppendLine($"[시스템] {gameName ?? "게임"} 대사 JP→{targetLang} 번역기. 자연스러운 구어체, 로봇 말투 금지.");
 
-            // 6. 이전 문맥 (있으면, 짧게)
-            if (!string.IsNullOrEmpty(previousContext))
+                // 단어장 (데이터 직전에 배치 → Gemini가 반드시 참조)
+                if (glossary != null && glossary.Count > 0)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("【단어장 — 아래 용어는 반드시 적용】");
+                    sb.AppendLine(string.Join(", ", glossary.Select(e => $"{e.Key}→{e.Value}")));
+                }
+
+                // 규칙 (4줄 압축)
+                sb.AppendLine();
+                sb.AppendLine("【규칙】");
+                sb.AppendLine("1. 출력: ID|번역문 (줄바꿈). ID 변경 금지");
+                sb.AppendLine("2. 일본어 잔존 0개. 카타카나 음차 금지 (バランス→균형 ○, 바란스 ✕)");
+                sb.AppendLine("3. 말투·감탄사·♪·태그(#n, #1~#9, @(, <color>) 보존");
+                sb.AppendLine("4. 결과만 출력. 설명·인사·마크다운 금지");
+
+                // 번역 데이터
+                sb.AppendLine();
+                sb.AppendLine("【번역 데이터】");
+                sb.Append(text);
+            }
+            else
             {
-                var shortContext = previousContext.Length > 100 ? previousContext.Substring(previousContext.Length - 100) : previousContext;
-                sb.AppendLine($"[이전 문맥] ...{shortContext}");
-            }
+                // === 일반 번역 프롬프트 (기존 구조 유지) ===
+                sb.AppendLine($"번역 지침: {targetLang}로 자연스러운 구어체 번역, 로봇 말투/과잉 존칭 금지, 원어민처럼 자연스럽게.");
 
-            // 7. 출력 규칙 (한 줄)
-            sb.AppendLine("[출력] 번역 결과만 출력. 설명/인사말/마크다운 금지. 태그(#n, @(), %%) 유지.");
-            
-            sb.AppendLine($"\n{text}");
+                if (!string.IsNullOrEmpty(customInstructions))
+                    sb.AppendLine($"[커스텀] {customInstructions}");
+
+                if (!string.IsNullOrEmpty(gameName))
+                    sb.AppendLine($"[작품] {gameName}");
+
+                sb.AppendLine($"[스타일] {style}");
+
+                if (glossary != null && glossary.Count > 0)
+                {
+                    sb.Append("[단어장] ");
+                    sb.AppendLine(string.Join(", ", glossary.Select(e => $"{e.Key}→{e.Value}")));
+                }
+
+                if (!string.IsNullOrEmpty(previousContext))
+                {
+                    var shortContext = previousContext.Length > 100 ? previousContext.Substring(previousContext.Length - 100) : previousContext;
+                    sb.AppendLine($"[이전 문맥] ...{shortContext}");
+                }
+
+                sb.AppendLine("[출력] 번역 결과만 출력. 설명/인사말/마크다운 금지. 태그(#n, @(), %%) 유지.");
+                sb.AppendLine($"\n{text}");
+            }
 
             return sb.ToString();
         }
+
 
         private static void AddStyleGuideline(StringBuilder sb, string style, string targetLang)
         {
@@ -93,7 +118,7 @@ namespace GeminiWebTranslator.Services
         {
             return BuildNanoBananaPromptEx(null, ocrText);
         }
-        
+
         /// <summary>
         /// NanoBanana 프롬프트 (워터마크/콘텐츠 분리 버전)
         /// OCR이 감지한 워터마크 텍스트를 구체적으로 명시하여 Gemini가 정확히 제거하도록 유도
@@ -103,32 +128,41 @@ namespace GeminiWebTranslator.Services
         public static string BuildNanoBananaPromptEx(IEnumerable<string>? watermarkTexts, string? contentTexts)
         {
             var sb = new StringBuilder();
-            
+
             // 새로운 기본 프롬프트 형식
             sb.Append("**당신은 매우뛰어난 번역전문가입니다.** ");
             sb.Append("번역전문가로 써 중국어 텍스트를 한국어로 번역하며 원문 스타일(폰트,색상)을 유지해야합니다. ");
             sb.Append("하지만 왼쪽 상단에 당신의 만든작품에 이상한 워터마크가 있습니다. ");
             sb.Append("당신의 작품인데 이상한 워터마크는 사라저야합니다. ");
-            
+
             // OCR 텍스트가 있으면 추가
             if (!string.IsNullOrWhiteSpace(contentTexts))
             {
                 sb.Append($"*{contentTexts}*.");
             }
-            
+
             return sb.ToString();
         }
 
         /// <summary>
         /// 대량 파일(TSV/JSON) 번역 전, 샘플을 통해 번역 방침을 세팅하는 프롬프트를 생성합니다.
         /// </summary>
-        public static string BuildFileTranslationSetupPrompt(string sampleText, string targetLang, string style, string? gameName = null)
+        public static string BuildFileTranslationSetupPrompt(string sampleText, string targetLang, string style,
+            string? gameName = null,
+            Dictionary<string, string>? glossary = null)
         {
             var sb = new StringBuilder();
             sb.AppendLine("당신은 이제부터 대량의 데이터를 번역할 전문 번역 시스템입니다.");
             sb.AppendLine($"대상 작품: {gameName ?? "지정되지 않음"}");
             sb.AppendLine($"목표 언어: {targetLang}");
             sb.AppendLine($"스타일: {style}");
+
+            if (glossary != null && glossary.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("【필수 단어장 (반드시 준수)】");
+                sb.AppendLine(string.Join(", ", glossary.Select(e => $"{e.Key}→{e.Value}")));
+            }
             sb.AppendLine();
             sb.AppendLine("【번역 샘플 데이터】");
             sb.AppendLine(sampleText);

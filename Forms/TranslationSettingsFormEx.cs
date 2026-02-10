@@ -18,40 +18,41 @@ namespace GeminiWebTranslator.Forms;
 public class TranslationSettingsFormEx : Form
 {
     #region Fields
-    
+
     private ComboBox cmbTargetLang = null!;
     private ComboBox cmbStyle = null!;
     private ComboBox cmbGamePreset = null!;
-    
+
     // 파일 미리보기
     private TextBox txtFilePreview = null!;
     private Button btnLoadFile = null!;
     private Label lblFileName = null!;
-    
+
     // 단어장 편집
     private DataGridView dgvGlossary = null!;
     private Button btnAddTerm = null!;
     private Button btnRemoveTerm = null!;
     private Button btnLoadGlossary = null!;
     private Button btnSaveGlossary = null!;
-    
+    private GroupBox grpGlossary = null!;
+
     // 프롬프트
     private CheckBox chkCustomPrompt = null!;
     private TextBox txtCustomPrompt = null!;
-    
+
     private Button btnApply = null!;
     private Button btnCancel = null!;
-    
+
     private TranslationSettings _settings;
     private string? _loadedFilePath;
     private string? _glossaryPath;
     private string? _savePath;
     private bool _autoSave = true;
-    
+
     #endregion
-    
+
     #region Properties
-    
+
     public TranslationSettings Settings => _settings;
     public string TargetLanguage => cmbTargetLang.SelectedItem?.ToString()?.Split('(')[0].Trim() ?? "한국어";
     public string TranslationStyle => cmbStyle.SelectedItem?.ToString() ?? "자연스럽게";
@@ -62,9 +63,9 @@ public class TranslationSettingsFormEx : Form
     public string? LoadedFileContent => txtFilePreview?.Text;
     public string? SavePath => _savePath;
     public bool AutoSaveEnabled => _autoSave;
-    
+
     #endregion
-    
+
     public TranslationSettingsFormEx(TranslationSettings? currentSettings = null)
     {
         _settings = currentSettings ?? new TranslationSettings();
@@ -73,7 +74,7 @@ public class TranslationSettingsFormEx : Form
         LoadGlossaryToGrid();
         this.TopMost = MainForm.IsAlwaysOnTop;
     }
-    
+
     private void InitializeComponent()
     {
         this.Text = "⚙️ 번역 설정 (확장)";
@@ -81,23 +82,26 @@ public class TranslationSettingsFormEx : Form
         this.StartPosition = FormStartPosition.CenterParent;
         this.FormBorderStyle = FormBorderStyle.Sizable;
         this.MinimumSize = new Size(700, 550);
-        
+
         var mainSplit = new SplitContainer
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Vertical
         };
-        
+
         // Panel MinSize와 SplitterDistance를 폼 로드 후 안전하게 설정
         // (컨트롤이 폼에 추가된 후에야 Width가 유효함)
-        this.Load += (s, e) => {
-            try {
+        this.Load += (s, e) =>
+        {
+            try
+            {
                 mainSplit.Panel1MinSize = 300;
                 mainSplit.Panel2MinSize = 250;
                 mainSplit.SplitterDistance = Math.Max(300, Math.Min(450, mainSplit.Width - 250));
-            } catch { }
+            }
+            catch { }
         };
-        
+
         // === 좌측: 파일 미리보기 + 기본 설정 ===
         var leftPanel = new TableLayoutPanel
         {
@@ -109,13 +113,14 @@ public class TranslationSettingsFormEx : Form
         leftPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
         leftPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         leftPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 130));
-        
+
         // 파일 로드 영역
         var filePanel = new FlowLayoutPanel { Dock = DockStyle.Fill };
         btnLoadFile = CreateButton("📂 파일 열기", 110);
         btnLoadFile.Click += BtnLoadFile_Click;
         var btnCloseFile = CreateButton("❌ 닫기", 70);
-        btnCloseFile.Click += (s, e) => {
+        btnCloseFile.Click += (s, e) =>
+        {
             _loadedFilePath = null;
             _savePath = null;
             txtFilePreview.Clear();
@@ -125,7 +130,7 @@ public class TranslationSettingsFormEx : Form
         lblFileName = new Label { Text = "파일이 로드되지 않음", AutoSize = true, Margin = new Padding(10, 10, 0, 0) };
         filePanel.Controls.AddRange(new Control[] { btnLoadFile, btnCloseFile, lblFileName });
         leftPanel.Controls.Add(filePanel, 0, 0);
-        
+
         // 파일 미리보기
         var grpPreview = new GroupBox { Text = "파일 미리보기", Dock = DockStyle.Fill };
         txtFilePreview = new TextBox
@@ -139,7 +144,7 @@ public class TranslationSettingsFormEx : Form
         };
         grpPreview.Controls.Add(txtFilePreview);
         leftPanel.Controls.Add(grpPreview, 0, 1);
-        
+
         // 기본 설정
         var grpBasic = new GroupBox { Text = "기본 설정", Dock = DockStyle.Fill };
         var basicPanel = new TableLayoutPanel
@@ -151,31 +156,31 @@ public class TranslationSettingsFormEx : Form
         };
         basicPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         basicPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        
+
         basicPanel.Controls.Add(CreateLabel("대상 언어:"), 0, 0);
         cmbTargetLang = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
         cmbTargetLang.Items.AddRange(new object[] { "한국어 (ko)", "English (en)", "日本語 (ja)", "中文 (zh)" });
         cmbTargetLang.SelectedIndex = 0;
         basicPanel.Controls.Add(cmbTargetLang, 1, 0);
-        
+
         basicPanel.Controls.Add(CreateLabel("번역 스타일:"), 0, 1);
         cmbStyle = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
         cmbStyle.Items.AddRange(new object[] { "자연스럽게", "게임 번역", "소설/문학 번역", "대화체" });
         cmbStyle.SelectedIndex = 0;
         basicPanel.Controls.Add(cmbStyle, 1, 1);
-        
+
         basicPanel.Controls.Add(CreateLabel("게임 프리셋:"), 0, 2);
         cmbGamePreset = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
         cmbGamePreset.Items.AddRange(new object[] { "(없음)", "붕괴학원2", "원신", "붕괴: 스타레일", "블루 아카이브" });
         cmbGamePreset.SelectedIndex = 0;
         cmbGamePreset.SelectedIndexChanged += CmbGamePreset_SelectedIndexChanged;
         basicPanel.Controls.Add(cmbGamePreset, 1, 2);
-        
+
         grpBasic.Controls.Add(basicPanel);
         leftPanel.Controls.Add(grpBasic, 0, 2);
-        
+
         mainSplit.Panel1.Controls.Add(leftPanel);
-        
+
         // === 우측: 단어장 + 프롬프트 ===
         var rightPanel = new TableLayoutPanel
         {
@@ -187,9 +192,9 @@ public class TranslationSettingsFormEx : Form
         rightPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
         rightPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
         rightPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
-        
+
         // 단어장 편집
-        var grpGlossary = new GroupBox { Text = "단어장 편집", Dock = DockStyle.Fill };
+        grpGlossary = new GroupBox { Text = "단어장 편집", Dock = DockStyle.Fill };
         var glossaryLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -198,7 +203,7 @@ public class TranslationSettingsFormEx : Form
         };
         glossaryLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         glossaryLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        
+
         var glossaryButtons = new FlowLayoutPanel { Dock = DockStyle.Fill };
         btnAddTerm = CreateButton("➕ 추가", 80);
         btnAddTerm.Click += BtnAddTerm_Click;
@@ -210,7 +215,7 @@ public class TranslationSettingsFormEx : Form
         btnSaveGlossary.Click += BtnSaveGlossary_Click;
         glossaryButtons.Controls.AddRange(new Control[] { btnAddTerm, btnRemoveTerm, btnLoadGlossary, btnSaveGlossary });
         glossaryLayout.Controls.Add(glossaryButtons, 0, 0);
-        
+
         dgvGlossary = new DataGridView
         {
             Dock = DockStyle.Fill,
@@ -225,10 +230,10 @@ public class TranslationSettingsFormEx : Form
         dgvGlossary.Columns["SourceTerm"].FillWeight = 50;
         dgvGlossary.Columns["TargetTerm"].FillWeight = 50;
         glossaryLayout.Controls.Add(dgvGlossary, 0, 1);
-        
+
         grpGlossary.Controls.Add(glossaryLayout);
         rightPanel.Controls.Add(grpGlossary, 0, 0);
-        
+
         // 커스텀 프롬프트
         var grpPrompt = new GroupBox { Text = "커스텀 프롬프트", Dock = DockStyle.Fill };
         var promptLayout = new TableLayoutPanel
@@ -239,11 +244,11 @@ public class TranslationSettingsFormEx : Form
         };
         promptLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         promptLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        
+
         chkCustomPrompt = new CheckBox { Text = "커스텀 프롬프트 사용", Dock = DockStyle.Fill };
         chkCustomPrompt.CheckedChanged += (s, e) => txtCustomPrompt.Enabled = chkCustomPrompt.Checked;
         promptLayout.Controls.Add(chkCustomPrompt, 0, 0);
-        
+
         txtCustomPrompt = new TextBox
         {
             Dock = DockStyle.Fill,
@@ -253,10 +258,10 @@ public class TranslationSettingsFormEx : Form
             Enabled = false
         };
         promptLayout.Controls.Add(txtCustomPrompt, 0, 1);
-        
+
         grpPrompt.Controls.Add(promptLayout);
         rightPanel.Controls.Add(grpPrompt, 0, 1);
-        
+
         // 하단 버튼
         var buttonPanel = new FlowLayoutPanel
         {
@@ -271,12 +276,12 @@ public class TranslationSettingsFormEx : Form
         btnApply.Click += BtnApply_Click;
         buttonPanel.Controls.AddRange(new Control[] { btnCancel, btnApply });
         rightPanel.Controls.Add(buttonPanel, 0, 2);
-        
+
         mainSplit.Panel2.Controls.Add(rightPanel);
-        
+
         this.Controls.Add(mainSplit);
     }
-    
+
     private Label CreateLabel(string text) => new Label
     {
         Text = text,
@@ -284,7 +289,7 @@ public class TranslationSettingsFormEx : Form
         TextAlign = ContentAlignment.MiddleLeft,
         Margin = new Padding(0, 8, 5, 0)
     };
-    
+
     private Button CreateButton(string text, int width) => new Button
     {
         Text = text,
@@ -294,7 +299,7 @@ public class TranslationSettingsFormEx : Form
         Cursor = Cursors.Hand,
         Margin = new Padding(3)
     };
-    
+
     private void ApplyTheme()
     {
         UiTheme.ApplyTheme(this);
@@ -310,9 +315,9 @@ public class TranslationSettingsFormEx : Form
         txtCustomPrompt.BackColor = UiTheme.ColorBackground;
         txtCustomPrompt.ForeColor = Color.White;
     }
-    
+
     #region Event Handlers
-    
+
     private void BtnLoadFile_Click(object? sender, EventArgs e)
     {
         using var ofd = new OpenFileDialog
@@ -320,7 +325,7 @@ public class TranslationSettingsFormEx : Form
             Filter = "텍스트 파일|*.txt;*.json;*.tsv;*.csv|모든 파일|*.*",
             Title = "번역할 파일 선택"
         };
-        
+
         if (ofd.ShowDialog() == DialogResult.OK)
         {
             try
@@ -328,14 +333,20 @@ public class TranslationSettingsFormEx : Form
                 var content = File.ReadAllText(ofd.FileName);
                 txtFilePreview.Text = content;
                 _loadedFilePath = ofd.FileName;
-                
+
                 // 자동 저장 경로 생성
                 var dir = Path.GetDirectoryName(ofd.FileName) ?? "";
                 var name = "translated_" + Path.GetFileName(ofd.FileName);
                 _savePath = Path.Combine(dir, name);
-                
+
                 lblFileName.Text = $"✅ {Path.GetFileName(ofd.FileName)} ({new FileInfo(ofd.FileName).Length / 1024}KB)";
                 lblFileName.ForeColor = UiTheme.ColorSuccess;
+
+                // [Phase 2] 같은 폴더의 glossary*.json 자동 감지
+                if (_settings.Glossary.Count == 0)
+                {
+                    AutoDetectGlossary(dir);
+                }
             }
             catch (Exception ex)
             {
@@ -343,13 +354,13 @@ public class TranslationSettingsFormEx : Form
             }
         }
     }
-    
+
     private void BtnAddTerm_Click(object? sender, EventArgs e)
     {
         dgvGlossary.Rows.Add("", "");
         dgvGlossary.CurrentCell = dgvGlossary.Rows[dgvGlossary.Rows.Count - 2].Cells[0];
     }
-    
+
     private void BtnRemoveTerm_Click(object? sender, EventArgs e)
     {
         if (dgvGlossary.SelectedRows.Count > 0)
@@ -361,7 +372,7 @@ public class TranslationSettingsFormEx : Form
             }
         }
     }
-    
+
     private void BtnLoadGlossary_Click(object? sender, EventArgs e)
     {
         using var ofd = new OpenFileDialog
@@ -369,7 +380,7 @@ public class TranslationSettingsFormEx : Form
             Filter = "JSON 파일|*.json|TSV 파일|*.tsv|모든 파일|*.*",
             Title = "단어장 파일 선택"
         };
-        
+
         if (ofd.ShowDialog() == DialogResult.OK)
         {
             try
@@ -377,6 +388,7 @@ public class TranslationSettingsFormEx : Form
                 _settings.Glossary = TranslationSettings.LoadGlossary(ofd.FileName);
                 _glossaryPath = ofd.FileName;
                 LoadGlossaryToGrid();
+                UpdateGlossaryTitle();
                 MessageBox.Show($"{_settings.Glossary.Count}개 용어 로드됨", "완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
@@ -385,7 +397,7 @@ public class TranslationSettingsFormEx : Form
             }
         }
     }
-    
+
     private void BtnSaveGlossary_Click(object? sender, EventArgs e)
     {
         using var sfd = new SaveFileDialog
@@ -394,7 +406,7 @@ public class TranslationSettingsFormEx : Form
             Title = "단어장 저장",
             FileName = "glossary.json"
         };
-        
+
         if (sfd.ShowDialog() == DialogResult.OK)
         {
             try
@@ -414,7 +426,7 @@ public class TranslationSettingsFormEx : Form
             }
         }
     }
-    
+
     private void CmbGamePreset_SelectedIndexChanged(object? sender, EventArgs e)
     {
         var game = cmbGamePreset.SelectedItem?.ToString() ?? "";
@@ -422,20 +434,25 @@ public class TranslationSettingsFormEx : Form
         {
             _settings = TranslationSettings.GetGamePreset(game);
             LoadGlossaryToGrid();
+            UpdateGlossaryTitle();
+        }
+        else
+        {
+            UpdateGlossaryTitle();
         }
     }
-    
+
     private void BtnApply_Click(object? sender, EventArgs e)
     {
         SaveGridToGlossary();
         DialogResult = DialogResult.OK;
         Close();
     }
-    
+
     #endregion
-    
+
     #region Helpers
-    
+
     private void LoadGlossaryToGrid()
     {
         dgvGlossary.Rows.Clear();
@@ -444,7 +461,7 @@ public class TranslationSettingsFormEx : Form
             dgvGlossary.Rows.Add(kvp.Key, kvp.Value);
         }
     }
-    
+
     private void SaveGridToGlossary()
     {
         _settings.Glossary.Clear();
@@ -459,6 +476,41 @@ public class TranslationSettingsFormEx : Form
             }
         }
     }
-    
+
+    private void UpdateGlossaryTitle()
+    {
+        int count = _settings.Glossary.Count;
+        if (count > 0)
+            grpGlossary.Text = $"단어장 편집 — ✅ {count}개 용어 로드됨";
+        else
+            grpGlossary.Text = "단어장 편집 — ⚠️ 단어장 없음";
+    }
+
+    private void AutoDetectGlossary(string directory)
+    {
+        try
+        {
+            var glossaryFiles = Directory.GetFiles(directory, "glossary*.json");
+            if (glossaryFiles.Length > 0)
+            {
+                var file = glossaryFiles[0];
+                var result = MessageBox.Show(
+                    $"같은 폴더에서 단어장을 발견했습니다:\n{Path.GetFileName(file)}\n\n자동으로 불러올까요?",
+                    "단어장 자동 감지",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+
+                if (result == DialogResult.Yes)
+                {
+                    _settings.Glossary = TranslationSettings.LoadGlossary(file);
+                    _glossaryPath = file;
+                    LoadGlossaryToGrid();
+                    UpdateGlossaryTitle();
+                }
+            }
+        }
+        catch { /* 무시 */ }
+    }
+
     #endregion
 }
