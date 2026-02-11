@@ -40,10 +40,14 @@ namespace GeminiWebTranslator.Services
                 // 규칙 (4줄 압축)
                 sb.AppendLine();
                 sb.AppendLine("【규칙】");
-                sb.AppendLine("1. 출력: ID|번역문 (줄바꿈). ID 변경 금지");
+                sb.AppendLine("1. 출력: ID|번역문 (줄바꿈). ID 변경 금지. 입력과 동일한 줄 수를 반드시 유지");
                 sb.AppendLine("2. 일본어 잔존 0개. 카타카나 음차 금지 (バランス→균형 ○, 바란스 ✕)");
-                sb.AppendLine("3. 말투·감탄사·♪·태그(#n, #1~#9, @(, <color>) 보존");
-                sb.AppendLine("4. 결과만 출력. 설명·인사·마크다운 금지");
+                sb.AppendLine("3. #n은 게임 줄바꿈 코드 — 원문과 동일 위치·동일 개수 필수 보존");
+                sb.AppendLine("4. 말투·감탄사·♪·태그(#1~#9, @(, <color>) 보존");
+                sb.AppendLine("5. 반드시 ```code 블록 안에 결과만 출력. 블록 밖 텍스트·설명·인사 금지");
+                sb.AppendLine("6. **절대로 인사말이나 부연 설명, 질문을 하지 마세요.** (예: '번역해 드렸습니다', '계속할까요?' 절대 금지)");
+                sb.AppendLine("7. 줄을 합치거나 생략하지 마세요. 번역할 수 없는 항목도 ID|원문 형태로 그대로 출력");
+                sb.AppendLine("8. **사용자에게 질문하지 말고 오직 번역 데이터만 즉시 출력하세요.**");
 
                 // 번역 데이터
                 sb.AppendLine();

@@ -34,6 +34,7 @@ public partial class MainForm
             loadedFilePath = null;
             loadedJsonData = null;
             loadedTsvLines = null;
+            loadedTsvSourcePath = null;
             txtInput.ReadOnly = false;
         }
 
@@ -50,6 +51,13 @@ public partial class MainForm
 
             if (loadedJsonData != null)
             {
+                // [추가] 기존 번역본 복구 시도
+                int recovered = translationService.TryRecoverJsonTranslations(loadedJsonData, loadedFilePath!);
+                if (recovered > 0)
+                {
+                    AppendLog($"[JSON] 기존 파일에서 {recovered}개의 번역을 복구하여 이어서 진행합니다.");
+                }
+
                 // JSON 사전 세팅 (Warm-up)
                 await translationService.ProcessJsonSetupAsync(loadedJsonData, targetLang, style, generator, currentSettings.GameName);
 
@@ -69,208 +77,90 @@ public partial class MainForm
 
     private async Task ProcessTsvBatchTranslationAsync(string targetLang, string style)
     {
-        if (loadedTsvLines == null || loadedTsvLines.Count == 0) return;
+        if (string.IsNullOrEmpty(loadedFilePath)) return;
+        string inputPath = loadedTsvSourcePath ?? loadedFilePath;
 
-        // 1. Prepare State
-        var state = new TsvTranslationService.TsvState
-        {
-            ItemsToTranslate = savedItemsToTranslate ?? new List<(int, string, string)>(),
-            Results = savedTranslationResults ?? new Dictionary<string, string>(),
-            LastBatchIndex = isPaused ? lastBatchIndex : 0,
-            TextToIds = new Dictionary<string, List<string>>()
-        };
+        // 1. 출력 경로 결정 (EC-1, EC-11)
+        string dir = Path.GetDirectoryName(loadedFilePath)!;
+        string fileName = Path.GetFileNameWithoutExtension(loadedFilePath);
+        string ext = Path.GetExtension(loadedFilePath);
+        string outputPath = fileName.EndsWith("_ko", StringComparison.OrdinalIgnoreCase)
+            ? loadedFilePath
+            : Path.Combine(dir, $"{fileName}_ko{ext}");
 
-        if (savedItemsToTranslate == null)
-        {
-            state = await tsvService.PrepareTsvStateAsync(loadedTsvLines, null);
-            // 게임 자동 감지 결과 반영 (사용자가 수동 지정 안 한 경우만)
-            if (!string.IsNullOrEmpty(state.DetectedGame) && string.IsNullOrEmpty(currentSettings.GameName))
-            {
-                currentSettings.GameName = state.DetectedGame;
-                AppendLog($"[설정] 게임 자동 감지됨: {state.DetectedGame}");
-            }
-        }
-        else
-        {
-            foreach (var item in state.ItemsToTranslate)
-            {
-                if (!state.TextToIds.ContainsKey(item.Item3)) state.TextToIds[item.Item3] = new List<string>();
-                state.TextToIds[item.Item3].Add(item.Item2);
-            }
-        }
-
-        // 2. Setup Generator
-        Func<string, Task<string>> generator = async (prompt) =>
-        {
-            try
-            {
-                if (useWebView2Mode && automation != null)
-                    return await automation.GenerateContentAsync(prompt);
-
-                if (chkHttpMode.Checked && httpClient?.IsInitialized == true)
-                {
-                    httpClient.ResetSession();
-                    return await httpClient.GenerateContentAsync(prompt);
-                }
-            }
-            catch (Exception ex) when (ex.Message.Contains("Target closed") || ex.Message.Contains("disconnected"))
-            {
-                AppendLog($"[ERROR] 연결 중단: {ex.Message}");
-                throw new Exception("연결이 중단되었습니다. 상태를 확인해주세요.");
-            }
-
-            throw new Exception("API 초기화 필요 (활성화된 모드가 없습니다)");
-        };
-
+        // 2. Generator 및 세션 리셋터 설정
+        Func<string, Task<string>> generator = CreateAiGenerator();
         Func<Task> sessionResetter = async () =>
         {
+            AppendLog("[INFO] 세션 최적화/리셋 수행 중...");
             try
             {
-                if (useWebView2Mode && automation != null)
+                if (ActiveMode == Models.TranslationMode.WebView && automation != null)
+                {
                     await automation.StartNewChatAsync();
-                else if (httpClient?.IsInitialized == true)
+                    await Task.Delay(1000); // WebView DOM 안정화 시간
+                }
+                else if (ActiveMode == Models.TranslationMode.Http && httpClient?.IsInitialized == true)
+                {
                     httpClient.ResetSession();
+                }
             }
-            catch (Exception ex)
-            {
-                AppendLog($"[WARN] 세션 리셋 중 오류: {ex.Message}");
-            }
+            catch (Exception ex) { AppendLog($"[WARN] 세션 리셋 중 오류: {ex.Message}"); }
 
-            // [Custom Prompt Injection]
             if (!string.IsNullOrWhiteSpace(CustomTranslationPrompt))
             {
-                try
-                {
+                try 
+                { 
+                    await generator($"[System Instruction]\n{CustomTranslationPrompt}\n\n확정."); 
                     await Task.Delay(500);
-                    await generator($"[System Instruction]\n{CustomTranslationPrompt}\n\n위 지침을 따르고 확인 메시지를 짧게 응답하세요.");
-                }
-                catch (Exception ex)
-                {
-                    AppendLog($"[WARN] 커스텀 프롬프트 주입 실패: {ex.Message}");
-                }
+                } catch { }
             }
         };
 
-        // 2.5. 출력 경로 미리 결정 & 초기 파일 생성
-        string? outputPath = null;
-        if (!string.IsNullOrEmpty(loadedFilePath))
-        {
-            var dir = Path.GetDirectoryName(loadedFilePath)!;
-            var fileName = Path.GetFileNameWithoutExtension(loadedFilePath);
-            var ext = Path.GetExtension(loadedFilePath);
-            outputPath = Path.Combine(dir, $"{fileName}_ko{ext}");
-
-            // 첫 시작 시에만 초기 파일 생성 (이어하기 시에는 기존 파일 유지)
-            if (!isPaused && !File.Exists(outputPath))
-            {
-                await File.WriteAllTextAsync(outputPath, string.Join("\r\n", loadedTsvLines), Encoding.UTF8);
-                AppendLog($"[TSV] 결과 파일 생성: {Path.GetFileName(outputPath)}");
-            }
-        }
-
-        // 3. Wire Events
+        // 3. 이벤트 바인딩
         Action<string> onLog = msg => AppendLog(msg);
         Action<string, Color> onStatus = (msg, col) => UpdateStatus(msg, col);
-        Action<string> onPartial = msg =>
-        {
-            txtOutput.Text = msg;
-            Application.DoEvents();
-        };
 
         tsvService.OnLog += onLog;
         tsvService.OnStatus += onStatus;
-        tsvService.OnPartialResult += onPartial;
-
-        Action<TsvTranslationService.TsvState> onBatchComplete = async s =>
-        {
-            if (string.IsNullOrEmpty(loadedFilePath)) return;
-            try
-            {
-                var dir = Path.GetDirectoryName(loadedFilePath)!;
-
-                // 1) JSON 진행 상황 저장 (기존 로직 유지)
-                var progressPath = Path.Combine(dir, "translation_progress.json");
-                File.WriteAllText(progressPath, JsonConvert.SerializeObject(s.Results, Formatting.Indented));
-
-                // 2) TSV 결과 파일 점진적 업데이트 (실시간 반영 개선)
-                if (!string.IsNullOrEmpty(outputPath))
-                {
-                    var updatedLines = tsvService.ApplyTranslations(loadedTsvLines!, s);
-
-                    // 파일 쓰기 재시도 로직 (잠금 대비)
-                    for (int attempt = 0; attempt < 3; attempt++)
-                    {
-                        try
-                        {
-                            using (var fs = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.Read))
-                            using (var sw = new StreamWriter(fs, Encoding.UTF8))
-                            {
-                                sw.Write(string.Join("\r\n", updatedLines));
-                                sw.Flush();
-                                fs.Flush(flushToDisk: true); // OS 캐시까지 디스크에 강제 기록
-                            }
-                            break; // 성공 시 탈출
-                        }
-                        catch (IOException) when (attempt < 2)
-                        {
-                            await Task.Delay(500); // 0.5초 대기 후 재시도
-                        }
-                    }
-
-                    var fileInfo = new FileInfo(outputPath);
-                    onLog?.Invoke($"[TSV] 중간 저장 완료 ({s.Results.Count}건, {fileInfo.Length / 1024}KB)");
-                }
-            }
-            catch (Exception ex) { onLog?.Invoke($"[WARN] 중간 저장 실패: {ex.Message}"); }
-        };
-        tsvService.OnBatchComplete += onBatchComplete;
 
         try
         {
-            // 4. Execution (Added gameName, isWebViewMode, and glossary parameters)
-            await tsvService.ProcessBatchesAsync(
-                state,
+            AppendLog($"[TSV] 파일 모드 입력 경로: {inputPath}");
+            AppendLog($"[TSV] 파일 모드 출력 경로: {outputPath}");
+
+            // 4. 스트리밍 번역 실행
+            await tsvService.ProcessFileStreamAsync(
+                inputPath,
+                outputPath,
                 targetLang,
                 style,
                 generator,
                 sessionResetter,
                 currentSettings.GameName,
-                useWebView2Mode,
+                ActiveMode == Models.TranslationMode.WebView,
+                Services.SharedWebViewManager.Instance.UseLoginMode,
                 currentSettings.Glossary,
                 translationCancellation?.Token ?? CancellationToken.None);
 
-            // 5. Apply & Save State (최종 저장)
-            loadedTsvLines = tsvService.ApplyTranslations(loadedTsvLines, state);
-
-            savedTranslationResults = null;
-            savedItemsToTranslate = null;
-            lastBatchIndex = 0;
-
-            txtOutput.Text = $"[성공] 완료: {state.Results.Count}개\n--- 미리보기 ---\n" +
-                string.Join("\n", loadedTsvLines.Skip(1).Take(20).Select(l => l.Length > 50 ? l.Substring(0, 50) + "..." : l));
-
-            // 최종 파일 저장 (점진적 저장과 동일 경로)
-            if (!string.IsNullOrEmpty(outputPath))
-            {
-                await File.WriteAllTextAsync(outputPath, string.Join("\r\n", loadedTsvLines), Encoding.UTF8);
-                AppendLog($"[TSV] 최종 번역 파일 저장 완료: {outputPath}");
-            }
+            AppendLog($"[TSV] 번역 완료: {outputPath}");
+            UpdateStatus("[성공] TSV 번역 완료", Color.Green);
         }
         catch (OperationCanceledException)
         {
-            // Save state for resume — 파일은 이미 onBatchComplete에서 저장됨
-            savedTranslationResults = state.Results;
-            savedItemsToTranslate = state.ItemsToTranslate;
-            lastBatchIndex = state.LastBatchIndex;
-            AppendLog($"[TSV] 중단됨 — 부분 결과 {state.Results.Count}건이 {Path.GetFileName(outputPath)}에 저장되어 있습니다.");
+            AppendLog("[TSV] 사용자에 의해 중지되었습니다.");
+            UpdateStatus("[중지] 번역 중단", Color.Orange);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"[TSV] 오류 발생: {ex.Message}");
+            UpdateStatus("[오류] 번역 실패", Color.Red);
             throw;
         }
         finally
         {
             tsvService.OnLog -= onLog;
             tsvService.OnStatus -= onStatus;
-            tsvService.OnPartialResult -= onPartial;
-            tsvService.OnBatchComplete -= onBatchComplete;
         }
     }
 
@@ -346,14 +236,44 @@ public partial class MainForm
 
             UpdateStatus("🚀 간편 번역 시작...", UiTheme.ColorPrimary);
 
-            var simpleService = new SimpleFileTranslationService(CreateAiGenerator(), msg => AppendLog(msg));
+            Func<string, Task<string>> generator = CreateAiGenerator();
+            Func<Task> sessionResetter = async () =>
+            {
+                try
+                {
+                    if (ActiveMode == Models.TranslationMode.WebView && automation != null)
+                        await automation.StartNewChatAsync();
+                    else if (ActiveMode == Models.TranslationMode.Http && httpClient?.IsInitialized == true)
+                        httpClient.ResetSession();
+                }
+                catch (Exception ex)
+                {
+                    AppendLog($"[WARN] 세션 리셋 중 오류: {ex.Message}");
+                }
+
+                if (!string.IsNullOrWhiteSpace(CustomTranslationPrompt))
+                {
+                    try
+                    {
+                        await Task.Delay(500);
+                        await generator($"[System Instruction]\n{CustomTranslationPrompt}\n\n확인.");
+                    }
+                    catch { }
+                }
+            };
+
+            var simpleService = new SimpleFileTranslationService(generator, msg => AppendLog(msg));
 
             translationCancellation = new CancellationTokenSource();
 
             // 현재는 JSON만 지원 (TSV 확장은 추후 고려)
             if (Path.GetExtension(inputPath).ToLower() == ".json")
             {
-                await simpleService.TranslateJsonFileAsync(inputPath, glossaryPath, translationCancellation.Token);
+                bool isWebView = ActiveMode == Models.TranslationMode.WebView;
+                bool isLogin = Services.SharedWebViewManager.Instance.UseLoginMode;
+                int limit = isWebView ? (isLogin ? 15000 : 2900) : 5000;
+
+                await simpleService.TranslateJsonFileAsync(inputPath, glossaryPath, translationCancellation.Token, sessionResetter, limit);
                 UpdateStatus("✅ 번역 완료!", UiTheme.ColorSuccess);
                 MessageBox.Show("번역이 완료되었습니다.", "알림");
             }
@@ -382,6 +302,31 @@ public partial class MainForm
             btnStop.Text = "⏹️ 중지";
             btnStop.BackColor = Color.FromArgb(200, 80, 80);
             translationCancellation = null;
+        }
+    }
+
+    /// <summary>
+    /// Windows IO 안정성을 위한 재시도 기능이 포함된 파일 저장 메서드
+    /// </summary>
+    private async Task SaveFileWithRetryAsync(string path, string content, int maxAttempts = 3)
+    {
+        for (int attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            try
+            {
+                using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read))
+                using (var sw = new StreamWriter(fs, Encoding.UTF8))
+                {
+                    await sw.WriteAsync(content);
+                    await sw.FlushAsync();
+                    await fs.FlushAsync();
+                }
+                return;
+            }
+            catch (IOException) when (attempt < maxAttempts - 1)
+            {
+                await Task.Delay(500);
+            }
         }
     }
 }

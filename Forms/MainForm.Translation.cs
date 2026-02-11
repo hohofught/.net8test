@@ -22,7 +22,7 @@ public partial class MainForm
     private async void BtnTranslate_Click(object? sender, EventArgs e)
     {
         if (txtInput == null || txtOutput == null || progressBar == null) return;
-        
+
         var text = txtInput.Text?.Trim() ?? "";
         if (string.IsNullOrEmpty(text)) return;
 
@@ -33,7 +33,7 @@ public partial class MainForm
         // 기존 취소 토큰 정리 및 새 토큰 생성
         translationCancellation?.Dispose();
         translationCancellation = new CancellationTokenSource();
-        
+
         // 상태 초기화
         isTranslating = true;
         isPaused = false;
@@ -58,19 +58,19 @@ public partial class MainForm
             // 일반 텍스트 번역 실행
             await TranslateTextAsync(text, targetLang, style, 0, new List<string>(), translationCancellation.Token);
         }
-        catch (OperationCanceledException) 
-        { 
-            AppendLog("[번역] 사용자에 의해 중지됨"); 
+        catch (OperationCanceledException)
+        {
+            AppendLog("[번역] 사용자에 의해 중지됨");
         }
-        catch (Exception ex) 
-        { 
-            translationContext.RecordError(); 
-            txtOutput.Text += $"\n\n오류: {ex.Message}"; 
-            UpdateStatus("[실패] 오류", Color.Red); 
+        catch (Exception ex)
+        {
+            translationContext.RecordError();
+            txtOutput.Text += $"\n\n오류: {ex.Message}";
+            UpdateStatus("[실패] 오류", Color.Red);
         }
-        finally 
-        { 
-            FinishTranslation(); 
+        finally
+        {
+            FinishTranslation();
         }
     }
 
@@ -80,32 +80,11 @@ public partial class MainForm
     private async Task TranslateTextAsync(string text, string targetLang, string style, int startIndex, List<string> existingResults, CancellationToken ct)
     {
         // 1. 현재 선택된 모드에 맞는 답변 생성기(AI 호출 함수) 정의
-        Func<string, Task<string>> generator = async (prompt) =>
-        {
-            // WebView 모드 시도
-            if (useWebView2Mode)
-            {
-                if (automation == null)
-                {
-                    throw new Exception("WebView2가 아직 초기화되지 않았습니다. 잠시 후 다시 시도해주세요.");
-                }
-                return await automation.GenerateContentAsync(prompt);
-            }
-            
-            // HTTP 모드 시도 (체크박스 확인)
-            if (chkHttpMode.Checked && httpClient?.IsInitialized == true)
-            {
-                httpClient.ResetSession();
-                return await httpClient.GenerateContentAsync(prompt);
-            }
-            
-            // 아무 모드도 선택되지 않은 경우 - 친절한 안내
-            throw new Exception("번역 모드가 선택되지 않았습니다.\n\n다음 중 하나를 활성화해주세요:\n• HTTP 체크박스 켜기 + HTTP 설정 버튼\n• WebView 로그인 버튼");
-        };
+        Func<string, Task<string>> generator = CreateAiGenerator();
 
         // 2. 세션 리셋 로직 정의 (WebView 모드에서 지속적인 대화 안정성을 위함)
         Func<int, Task>? sessionResetter = null;
-        if (useWebView2Mode && automation != null)
+        if (ActiveMode == Models.TranslationMode.WebView && automation != null)
         {
             sessionResetter = async (idx) =>
             {
@@ -113,7 +92,7 @@ public partial class MainForm
                 {
                     AppendLog("[WebView2] 새 채팅 프로세스 시작...");
                     if (automation != null) await automation.StartNewChatAsync();
-                    
+
                     // Inject custom prompt if enabled
                     if (!string.IsNullOrWhiteSpace(CustomTranslationPrompt))
                     {
@@ -159,7 +138,7 @@ public partial class MainForm
                         progressBar.Maximum = total;
                     }
                     progressBar.Value = current;
-                    
+
                     float percent = (float)current / total * 100;
                     lblProgress.Text = $"{current}/{total} ({percent:F0}%)";
                 });
@@ -176,7 +155,7 @@ public partial class MainForm
             txtOutput.Text = TranslationCleaner.Clean(string.Join("\n\n", existingResults));
             txtOutput.SelectionStart = txtOutput.TextLength;
             txtOutput.ScrollToCaret(); // 항상 마지막 줄을 보여줌
-            
+
             // UI 스레드 양보 (Application.DoEvents 대안)
             Task.Yield();
         };
@@ -192,7 +171,7 @@ public partial class MainForm
             await translationService.TranslateTextAsync(
                 text, targetLang, style, currentSettings,
                 generator, sessionResetter, ct, existingResults,
-                useVisualHistory: useWebView2Mode);
+                useVisualHistory: ActiveMode == Models.TranslationMode.WebView);
         }
         finally
         {
@@ -201,7 +180,7 @@ public partial class MainForm
             translationService.OnStatus -= onStatus;
             translationService.OnProgress -= onProgress;
             translationService.OnChunkTranslated -= onChunk;
-            
+
             // 작업이 성공적으로 끝난 경우 임시 저장된 상태 초기화
             savedChunks = null;
             savedResults = null;
@@ -229,9 +208,9 @@ public partial class MainForm
             btnTranslate.Enabled = false;
             progressBar.Visible = true;
 
-            if (isFileMode) 
-            { 
-                await ProcessFileTranslationAsync(targetLang, style); 
+            if (isFileMode)
+            {
+                await ProcessFileTranslationAsync(targetLang, style);
             }
             else
             {
@@ -240,19 +219,19 @@ public partial class MainForm
                 await TranslateTextAsync(text, targetLang, style, next, savedResults ?? new List<string>(), translationCancellation.Token);
             }
         }
-        catch (OperationCanceledException) 
-        { 
-            AppendLog("[번역] 중지됨"); 
+        catch (OperationCanceledException)
+        {
+            AppendLog("[번역] 중지됨");
         }
-        catch (Exception ex) 
-        { 
-            translationContext.RecordError(); 
-            txtOutput.Text += $"\n\n오류: {ex.Message}"; 
-            UpdateStatus("[실패] 오류", Color.Red); 
+        catch (Exception ex)
+        {
+            translationContext.RecordError();
+            txtOutput.Text += $"\n\n오류: {ex.Message}";
+            UpdateStatus("[실패] 오류", Color.Red);
         }
-        finally 
-        { 
-            FinishTranslation(); 
+        finally
+        {
+            FinishTranslation();
         }
     }
 

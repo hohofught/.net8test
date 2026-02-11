@@ -78,8 +78,17 @@ namespace GeminiWebTranslator.Forms
             var btnOpenCurrent = CreateDebugButton("🌐 [현재] WebView 브라우저 보기", UiTheme.ColorPrimary);
             btnOpenCurrent.Click += (s, e) =>
             {
-                AppendLocalLog("[Debug] 현재 실행 중인 WebView 창 열기 시도...");
-                _mainForm.ShowBrowserWindow();
+                if (!btnOpenCurrent.Enabled) return;
+                btnOpenCurrent.Enabled = false;
+                try
+                {
+                    AppendLocalLog("[Debug] 현재 실행 중인 WebView 창 열기 시도...");
+                    _mainForm.ShowBrowserWindow();
+                }
+                finally
+                {
+                    btnOpenCurrent.Enabled = true;
+                }
             };
 
             // 2. 로그인 프로필 전용 브라우저

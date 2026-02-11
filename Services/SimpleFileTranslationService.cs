@@ -5,6 +5,8 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.RegularExpressions;
+using System.Text;
 
 namespace GeminiWebTranslator.Services
 {
@@ -32,7 +34,7 @@ namespace GeminiWebTranslator.Services
         /// <summary>
         /// JSON 파일을 배치 단위로 번역합니다.
         /// </summary>
-        public async Task TranslateJsonFileAsync(string inputPath, string glossaryPath, CancellationToken ct)
+        public async Task TranslateJsonFileAsync(string inputPath, string glossaryPath, CancellationToken ct, Func<Task>? sessionResetter = null, int charLimit = 5000)
         {
             string baseDir = Path.GetDirectoryName(inputPath) ?? throw new ArgumentException("유효하지 않은 입력 경로입니다.");
             string fileName = Path.GetFileNameWithoutExtension(inputPath);
@@ -46,39 +48,82 @@ namespace GeminiWebTranslator.Services
             string jsonText = File.ReadAllText(inputPath);
             var sourceData = JsonSerializer.Deserialize<Dictionary<string, string>>(jsonText)
                 ?? throw new InvalidDataException("JSON 데이터 로드 실패");
-            var glossary = new Dictionary<string, string>();
-            if (File.Exists(glossaryPath))
+
+            // [추가] 기존 번역본 탐색 및 복구 로직
+            var recoveredData = TryRecoverExistingTranslations(inputPath, sourceData);
+            if (recoveredData.Count > 0)
             {
-                var glossaryJson = JsonDocument.Parse(File.ReadAllText(glossaryPath));
-                if (glossaryJson.RootElement.TryGetProperty("JP_TO_KR", out var jpToKr))
+                _logger($"[Simple] 기존 파일에서 {recoveredData.Count}개의 번역을 복구했습니다.");
+
+                // 기존 번역본이 있으면 체크포인트와 충돌할 수 있으므로 초기화 유도 권장
+                if (File.Exists(checkpointPath))
                 {
-                    foreach (var prop in jpToKr.EnumerateObject())
-                    {
-                        glossary[prop.Name] = prop.Value.GetString() ?? string.Empty;
-                    }
+                    _logger("[Simple] 기존 번역본 복구로 인해 체크포인트를 재구성합니다.");
+                    try { File.Delete(checkpointPath); } catch { }
+                    try { if (Directory.Exists(progressDir)) Directory.Delete(progressDir, true); } catch { }
                 }
             }
 
-            // 2. 배치 분할
-            var nonEmpty = sourceData.Where(x => !string.IsNullOrWhiteSpace(x.Value)).ToList();
+            var glossary = new Dictionary<string, string>();
+            if (File.Exists(glossaryPath))
+            {
+                try
+                {
+                    var glossaryJson = JsonDocument.Parse(File.ReadAllText(glossaryPath));
+                    if (glossaryJson.RootElement.TryGetProperty("JP_TO_KR", out var jpToKr))
+                    {
+                        foreach (var prop in jpToKr.EnumerateObject())
+                        {
+                            glossary[prop.Name] = prop.Value.GetString() ?? string.Empty;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger($"[Simple] 단어장 로드 실패(무시): {ex.Message}");
+                }
+            }
+
+            // 2. 배치 분할 (이미 번역된 recoveredData 항목 제외)
+            var nonEmpty = sourceData
+                .Where(x => !string.IsNullOrWhiteSpace(x.Value))
+                .Where(x => !recoveredData.ContainsKey(x.Key))
+                .ToList();
+
             var emptyEntries = sourceData.Where(x => string.IsNullOrWhiteSpace(x.Value)).ToDictionary(x => x.Key, x => x.Value);
 
-            int batchSize = 50;
+            // [변경] 글자 수 기반 배치 분할 (사용자 지정 한도 준수)
             var batches = new List<Dictionary<string, string>>();
-            for (int i = 0; i < nonEmpty.Count; i += batchSize)
+            var currentBatch = new Dictionary<string, string>();
+            int currentBatchChars = 0;
+
+            foreach (var kv in nonEmpty)
             {
-                batches.Add(nonEmpty.Skip(i).Take(batchSize).ToDictionary(x => x.Key, x => x.Value));
+                int itemLen = kv.Key.Length + kv.Value.Length + 10; // 오버헤드 포함
+                if (currentBatchChars + itemLen > charLimit && currentBatch.Count > 0)
+                {
+                    batches.Add(currentBatch);
+                    currentBatch = new Dictionary<string, string>();
+                    currentBatchChars = 0;
+                }
+                currentBatch[kv.Key] = kv.Value;
+                currentBatchChars += itemLen;
             }
+            if (currentBatch.Count > 0) batches.Add(currentBatch);
 
             CheckpointData checkpoint = new CheckpointData();
             if (File.Exists(checkpointPath))
             {
-                var loaded = JsonSerializer.Deserialize<CheckpointData>(File.ReadAllText(checkpointPath));
-                if (loaded != null)
+                try
                 {
-                    checkpoint = loaded;
-                    _logger($"[Simple] 체크포인트 로드됨. 마지막 배치: {checkpoint.LastBatchIndex}");
+                    var loaded = JsonSerializer.Deserialize<CheckpointData>(File.ReadAllText(checkpointPath));
+                    if (loaded != null)
+                    {
+                        checkpoint = loaded;
+                        _logger($"[Simple] 체크포인트 로드됨. 마지막 배치: {checkpoint.LastBatchIndex}");
+                    }
                 }
+                catch { /* ignore corrupt checkpoint */ }
             }
 
             if (!Directory.Exists(progressDir)) Directory.CreateDirectory(progressDir);
@@ -86,44 +131,59 @@ namespace GeminiWebTranslator.Services
             // 4. 번역 루프
             string glossaryStr = string.Join(", ", glossary.Select(x => $"{x.Key}={x.Value}"));
 
-            for (int i = checkpoint.LastBatchIndex + 1; i < batches.Count; i++)
+            if (batches.Count == 0 && recoveredData.Count > 0)
             {
-                ct.ThrowIfCancellationRequested();
-
-                _logger($"[Simple] 배치 번역 중... ({i + 1}/{batches.Count})");
-
-                var currentBatch = batches[i];
-                string prompt = BuildPrompt(currentBatch, glossaryStr);
-
-                try
+                _logger("[Simple] 모든 항목이 이미 번역되어 있습니다.");
+            }
+            else
+            {
+                for (int i = checkpoint.LastBatchIndex + 1; i < batches.Count; i++)
                 {
-                    string response = await _aiGenerator(prompt);
-                    var result = ExtractJsonFromResponse(response);
+                    ct.ThrowIfCancellationRequested();
 
-                    if (result != null)
+                    // [PERIODIC RESET] 10배치마다 세션 리셋
+                    if (i > 0 && i % 10 == 0 && sessionResetter != null)
                     {
-                        // 결과 저장
-                        string batchFile = Path.Combine(progressDir, $"batch_{i:D5}.json");
-                        File.WriteAllText(batchFile, JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
-
-                        // 체크포인트 업데이트
-                        checkpoint.CompletedBatches.Add(i);
-                        checkpoint.LastBatchIndex = i;
-                        File.WriteAllText(checkpointPath, JsonSerializer.Serialize(checkpoint));
+                        _logger($"[Simple] 10배치 주기 도달 -> 세션 자동 리셋 중...");
+                        await sessionResetter();
+                        await Task.Delay(1000, ct);
                     }
-                    else
+
+                    var activeBatch = batches[i];
+                    int percentage = (int)((double)(i + 1) / batches.Count * 100);
+                    _logger($"[JSON] 배치 {i + 1}/{batches.Count} ({percentage}%) 번역 중... (항목: {activeBatch.Count}개)");
+                    string prompt = BuildPrompt(activeBatch, glossaryStr);
+
+                    try
                     {
-                        _logger($"[Simple] 배치 {i} 번역 결과 파싱 실패. 원본 유지.");
-                        // 실패 시 원본 저장 (필요 시)
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger($"[Simple] 배치 {i} 오류: {ex.Message}");
-                    throw; // 상위에서 처리하도록 던짐
-                }
+                        string response = await _aiGenerator(prompt);
+                        var result = ExtractJsonFromResponse(response);
 
-                await Task.Delay(2000, ct); // 서버 부하 방지용 딜레이
+                        if (result != null)
+                        {
+                            // 결과 저장
+                            string batchFile = Path.Combine(progressDir, $"batch_{i:D5}.json");
+                            File.WriteAllText(batchFile, JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
+
+                            // 체크포인트 업데이트
+                            checkpoint.CompletedBatches.Add(i);
+                            checkpoint.LastBatchIndex = i;
+                            File.WriteAllText(checkpointPath, JsonSerializer.Serialize(checkpoint));
+                            _logger($"[JSON] 배치 {i + 1} 번역 성공 및 체크포인트 기록 완료");
+                        }
+                        else
+                        {
+                            _logger($"[Simple] 배치 {i} 번역 결과 파싱 실패. 원본 유지.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger($"[Simple] 배치 {i} 오류: {ex.Message}");
+                        throw;
+                    }
+
+                    await Task.Delay(2000, ct);
+                }
             }
 
             // 5. 최종 병합
@@ -132,17 +192,30 @@ namespace GeminiWebTranslator.Services
                 _logger("[Simple] 모든 배치 완료. 결과 병합 중...");
                 var finalResult = new Dictionary<string, string>();
 
-                for (int i = 0; i < batches.Count; i++)
+                // 5-1. 기존 복구 데이터 먼저 채우기
+                foreach (var kv in recoveredData) finalResult[kv.Key] = kv.Value;
+
+                // 5-2. 새로 번역된 배치 파일 병합
+                if (Directory.Exists(progressDir))
                 {
-                    string batchFile = Path.Combine(progressDir, $"batch_{i:D5}.json");
-                    if (File.Exists(batchFile))
+                    foreach (var file in Directory.GetFiles(progressDir, "*.json").OrderBy(f => f))
                     {
-                        var batchData = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(batchFile));
-                        if (batchData != null)
+                        try
                         {
-                            foreach (var kv in batchData) finalResult[kv.Key] = kv.Value;
+                            var batchData = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(file));
+                            if (batchData != null)
+                            {
+                                foreach (var kv in batchData) finalResult[kv.Key] = kv.Value;
+                            }
                         }
+                        catch { /* skip corrupt batch */ }
                     }
+                }
+
+                // 5-3. 미번역 원본 데이터 채우기 (누락 방지)
+                foreach (var kv in sourceData)
+                {
+                    if (!finalResult.ContainsKey(kv.Key)) finalResult[kv.Key] = kv.Value;
                 }
 
                 foreach (var kv in emptyEntries) finalResult[kv.Key] = kv.Value;
@@ -154,6 +227,47 @@ namespace GeminiWebTranslator.Services
                 File.WriteAllText(outputPath, JsonSerializer.Serialize(sortedResult, new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
                 _logger($"[Simple] 최종 번역 완료: {outputPath}");
             }
+        }
+
+        private Dictionary<string, string> TryRecoverExistingTranslations(string inputPath, Dictionary<string, string> sourceData)
+        {
+            var recovered = new Dictionary<string, string>();
+            string baseDir = Path.GetDirectoryName(inputPath) ?? string.Empty;
+            string fileName = Path.GetFileNameWithoutExtension(inputPath);
+
+            var candidatePaths = new[] {
+                Path.Combine(baseDir, $"{fileName}_translated.json"),
+                Path.Combine(baseDir, $"{fileName}_ko.json")
+            };
+
+            foreach (var path in candidatePaths)
+            {
+                if (!File.Exists(path)) continue;
+
+                try
+                {
+                    var existing = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path));
+                    if (existing == null) continue;
+
+                    foreach (var kv in existing)
+                    {
+                        if (sourceData.TryGetValue(kv.Key, out var original))
+                        {
+                            // 번역 여부 판정: 
+                            // 1. 값이 있고, 2. 원본과 다르고, 3. 일본어가 포함되지 않은 경우
+                            if (!string.IsNullOrWhiteSpace(kv.Value) &&
+                                kv.Value != original &&
+                                !Regex.IsMatch(kv.Value, @"[\u3040-\u309F\u30A0-\u30FF]"))
+                            {
+                                recovered[kv.Key] = kv.Value;
+                            }
+                        }
+                    }
+                    if (recovered.Count > 0) break; // 하나라도 성공하면 중단
+                }
+                catch { /* skip corrupt file */ }
+            }
+            return recovered;
         }
 
         private string BuildPrompt(Dictionary<string, string> batch, string glossaryStr)

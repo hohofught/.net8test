@@ -40,8 +40,8 @@ public interface IGeminiAutomation
     /// <summary>입력 가능 상태인지 확인</summary>
     Task<bool> IsReadyAsync();
     
-    /// <summary>새 채팅 시작</summary>
-    Task StartNewChatAsync();
+    /// <summary>새 채팅 시작 (skipLock=true: 이미 lock 보유 중일 때 교착 방지)</summary>
+    Task StartNewChatAsync(bool skipLock = false);
     
     #endregion
     

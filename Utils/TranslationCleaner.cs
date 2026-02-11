@@ -47,13 +47,13 @@ public static class TranslationCleaner
         // 패턴: 숫자. 뒤에 공백이나 따옴표가 오는 경우 (대화 번호로 추정)
         // 200. " 또는 200. 「 형태
         var pattern = @"(?<!\n)(\d{1,4})\.\s*([""「「『])";
-        
+
         // 각 번호 앞에 줄바꿈 추가
         text = Regex.Replace(text, pattern, "\n$1. $2");
-        
+
         // 첫 줄 앞의 불필요한 줄바꿈 제거
         text = text.TrimStart('\n', '\r');
-        
+
         return text;
     }
 
@@ -76,7 +76,15 @@ public static class TranslationCleaner
             @"\n*더 필요한.*있으시면.*$",
             @"\n*추가로.*필요하시면.*$",
             @"\n*Let me know if.*$",
-            @"\n*Feel free to.*$"
+            @"^Feeling free to.*$",
+            // [추가] 한국어 인삿말 패턴 (Gemini가 자주 붙이는 내용)
+            @"^번역해 드렸습니다:?\s*",
+            @"^번역 결과입니다:?\s*",
+            @"^원하신 대로.*번역.*하였습니다:?\s*",
+            @"^더 번역할 내용이 있다면.*$",
+            @"^도움이 되길 바랍니다.*$",
+            @"^추가로 도움이 필요하시면.*$",
+            @"^문맥에 따라.*수정하였습니다.*$"
         };
 
         foreach (var pattern in patterns)
@@ -129,6 +137,50 @@ public static class TranslationCleaner
         text = Regex.Replace(text, @"\n +", "\n");
 
         return text;
+    }
+
+    /// <summary>
+    /// TSV 모드용: 코드블록(```code ... ```) 내부 텍스트만 추출합니다.
+    /// 코드블록이 없으면 원본을 그대로 반환합니다.
+    /// </summary>
+    public static string ExtractCodeBlock(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+
+        // [EC-12] 인삿말이 섞인 경우 코드 블록만 강제 추출
+        var match = Regex.Match(text, @"```(?:\w*)\s*\n?([\s\S]*?)```");
+        if (match.Success) return match.Groups[1].Value.Trim();
+
+        // 코드 블록이 없는데 인삿말만 있는 줄이 포함된 경우 필터링 시도
+        var lines = text.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+        var filteredLines = lines.Where(l => !IsPossibleMetaText(l)).ToList();
+
+        return filteredLines.Count > 0 ? string.Join("\n", filteredLines).Trim() : text.Trim();
+    }
+
+    private static readonly string[] MetaTriggers = {
+        "번역해 드렸습니다", "번역 결과", "도움이 되길", "도움이 되었기를",
+        "더 필요한", "말씀해 주세요", "원하시는 대로", "자연스러운 한국어",
+        "Here is", "Here's", "translated as", "I have translated",
+        "Would you like", "anything else", "continue with", "next part",
+        "번역을 계속", "다음 부분", "도움이 필요하시면", "계속할까요",
+        // [추가] 세션 리셋 직후 자주 섞이는 응답 패턴
+        "알겠습니다", "요청하신 내용을", "텍스트를 보내주세요", "내용을 보내주세요",
+        "번역할 내용을", "준비되었습니다", "처리하겠습니다", "확인했습니다"
+    };
+
+    /// <summary>
+    /// 해당 줄이 번역 데이터가 아닌 Gemini의 인삿말/설명문인지 확인합니다.
+    /// </summary>
+    public static bool IsPossibleMetaText(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return false;
+        if (line.Contains("|")) return false; // 데이터 형식이면 메타 텍스트 아님
+
+        line = line.Trim();
+        if (line.Length < 2) return false;
+
+        return MetaTriggers.Any(t => line.Contains(t, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>

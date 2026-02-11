@@ -26,24 +26,24 @@ namespace GeminiWebTranslator
         private string? _snlm0e;         // Gemini API 호출에 필요한 보안 토큰
         private string? _userAgent;
         private string _model = "flash"; // 기본값
-        
+
         // 자동 채팅 삭제 및 채팅 재사용 관련
         private int _messageCount = 0;
         private string? _currentChatId;
         private object? _chatMetadata;  // 채팅 메타데이터 (Python의 chat.metadata)
         private const int MaxMessagesPerChat = 10;
-        
+
         /// <summary>
         /// 자동 채팅 삭제 활성화 여부 (10회 사용 후 삭제)
         /// </summary>
         public bool AutoDeleteEnabled { get; set; } = true;
-        
+
         /// <summary>
         /// 쿠키 만료 시 재추출을 위한 콜백
         /// (psid, psidts, userAgent) 튜플을 반환해야 함
         /// </summary>
         public Func<Task<(string?, string?, string?)>>? OnCookieRefreshNeeded { get; set; }
-        
+
         /// <summary>
         /// 현재 선택된 모델 (flash 또는 pro)
         /// </summary>
@@ -54,7 +54,7 @@ namespace GeminiWebTranslator
         }
 
         private CookieContainer? _cookieContainer;
-        
+
         // Gemini 관련 URL 설정
         private const string BaseUrl = "https://gemini.google.com";
         private const string GenerateEndpoint = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate";
@@ -66,12 +66,12 @@ namespace GeminiWebTranslator
         private const string RPC_LIST_CHATS = "MaZiqc";
         private const string RPC_READ_CHAT = "hNvQHb";
         private const string RPC_DELETE_CHAT = "GzXR5e";
-        
+
         /// <summary>
         /// 클라이언트의 초기화 완료 여부
         /// </summary>
         public bool IsInitialized { get; private set; }
-        
+
         /// <summary>
         /// 진행 상황을 기록하는 로깅 이벤트
         /// </summary>
@@ -97,7 +97,7 @@ namespace GeminiWebTranslator
                 }
 
                 var cookieContent = await ReadFileWithShareAsync(cookiePath);
-                
+
                 // 쿠키 파일 형식이 JSON인지 Netscape(텍스트)인지 확인하여 파싱
                 if (cookieContent.TrimStart().StartsWith("{"))
                 {
@@ -121,11 +121,11 @@ namespace GeminiWebTranslator
 
                 // HttpClient 및 공통 헤더 설정
                 InitializeHttpClient();
-                
+
                 // API 호출에 필수적인 SNlM0e 토큰 추출 (웹 페이지 분석)
                 Log("SNlM0e 토큰 추출 중...");
                 await ExtractSnlm0eTokenAsync();
-                
+
                 IsInitialized = true;
                 Log("초기화 완료");
                 return true;
@@ -136,7 +136,7 @@ namespace GeminiWebTranslator
                 throw new Exception($"초기화 실패: {ex.Message}", ex);
             }
         }
-        
+
         /// <summary>
         /// WebView에서 추출한 쿠키 값으로 직접 초기화합니다.
         /// </summary>
@@ -152,20 +152,20 @@ namespace GeminiWebTranslator
                 {
                     throw new ArgumentException("__Secure-1PSID 쿠키가 필요합니다.");
                 }
-                
+
                 _secure1PSID = psid;
                 _secure1PSIDTS = psidts;
                 _userAgent = userAgent;
-                
+
                 Log("WebView 쿠키로 초기화 시작...");
-                
+
                 // HttpClient 및 공통 헤더 설정
                 InitializeHttpClient();
-                
+
                 // API 호출에 필수적인 SNlM0e 토큰 추출
                 Log("SNlM0e 토큰 추출 중...");
                 await ExtractSnlm0eTokenAsync();
-                
+
                 IsInitialized = true;
                 Log("WebView 쿠키로 초기화 완료");
                 return true;
@@ -186,13 +186,13 @@ namespace GeminiWebTranslator
             foreach (var line in lines)
             {
                 if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#")) continue;
-                
+
                 var parts = line.Split('\t');
                 if (parts.Length >= 7)
                 {
                     var name = parts[5].Trim();
                     var value = parts[6].Trim();
-                    
+
                     if (name == "__Secure-1PSID") _secure1PSID = value;
                     else if (name == "__Secure-1PSIDTS") _secure1PSIDTS = value;
                 }
@@ -210,9 +210,9 @@ namespace GeminiWebTranslator
                 CookieContainer = _cookieContainer,
                 UseCookies = true
             };
-            
+
             _httpClient = new HttpClient(handler);
-            
+
             // 필수적인 구글 인증 쿠키 추가
             var baseUri = new Uri(BaseUrl);
             _cookieContainer.Add(baseUri, new Cookie("__Secure-1PSID", _secure1PSID));
@@ -220,13 +220,13 @@ namespace GeminiWebTranslator
             {
                 _cookieContainer.Add(baseUri, new Cookie("__Secure-1PSIDTS", _secure1PSIDTS));
             }
-            
+
             // 일반적인 브라우저처럼 보이도록 필수 헤더 설정
             _httpClient.DefaultRequestHeaders.Add("Host", "gemini.google.com");
             _httpClient.DefaultRequestHeaders.Add("Origin", "https://gemini.google.com");
             _httpClient.DefaultRequestHeaders.Add("Referer", "https://gemini.google.com/");
             _httpClient.DefaultRequestHeaders.Add("X-Same-Domain", "1");
-            
+
             var ua = _userAgent ?? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
             _httpClient.DefaultRequestHeaders.Add("User-Agent", ua);
         }
@@ -271,9 +271,9 @@ namespace GeminiWebTranslator
                 // [limit, 2 (unknown)]
                 var reqData = JsonSerializer.Serialize(new object[] { limit, 2 });
                 var responseText = await ExecuteBatchRequestAsync(RPC_LIST_CHATS, reqData);
-                
+
                 var result = new List<Dictionary<string, string>>();
-                
+
                 // 파싱 로직 (Python 참조)
                 var json = ParseBatchResponse(responseText);
                 if (json != null && json.Count > 0)
@@ -283,11 +283,11 @@ namespace GeminiWebTranslator
                     {
                         foreach (var chat in chatsArray)
                         {
-                            try 
+                            try
                             {
                                 var cid = chat[0]?.ToString();
                                 var title = chat[1]?.ToString();
-                                
+
                                 if (!string.IsNullOrEmpty(cid))
                                 {
                                     result.Add(new Dictionary<string, string>
@@ -301,7 +301,7 @@ namespace GeminiWebTranslator
                         }
                     }
                 }
-                
+
                 Log($"채팅 목록 수신 완료 ({result.Count}개)");
                 return result;
             }
@@ -341,20 +341,20 @@ namespace GeminiWebTranslator
         {
             Log($"채팅 읽기 요청: {chatId}");
             var messages = new List<Dictionary<string, string>>();
-            
+
             try
             {
                 // Python: [[cid, None, None]]
                 var reqData = JsonSerializer.Serialize(new object[] { new object?[] { chatId, null, null } });
                 var response = await ExecuteBatchRequestAsync(RPC_READ_CHAT, reqData);
                 var parsed = ParseBatchResponse(response);
-                
+
                 if (parsed == null || parsed.Count == 0)
                 {
                     Log("채팅 내용 없음");
                     return messages;
                 }
-                
+
                 // 응답 파싱: [[message_list, ...], ...]
                 // message_list[i] = [user_prompt, model_response, ...]
                 var data = parsed[0] as JArray;
@@ -369,7 +369,7 @@ namespace GeminiWebTranslator
                             {
                                 var userPrompt = msgArray[0]?.ToString() ?? "";
                                 var modelResponse = msgArray[1]?.ToString() ?? "";
-                                
+
                                 if (!string.IsNullOrEmpty(userPrompt))
                                 {
                                     messages.Add(new Dictionary<string, string>
@@ -390,7 +390,7 @@ namespace GeminiWebTranslator
                         }
                     }
                 }
-                
+
                 Log($"채팅 읽기 완료: {messages.Count}개 메시지");
                 return messages;
             }
@@ -433,11 +433,11 @@ namespace GeminiWebTranslator
         private async Task ExtractSnlm0eTokenAsync()
         {
             if (_httpClient == null) throw new InvalidOperationException("HttpClient가 초기화되지 않았습니다.");
-            
+
             try
             {
                 var response = await _httpClient.GetAsync(BaseUrl);
-                
+
                 // 로그인 페이지로 튕겼는지(리다이렉션) 확인하여 쿠키 만료 여부 감지
                 var finalUrl = response.RequestMessage?.RequestUri?.ToString() ?? "";
                 if (finalUrl.Contains("accounts.google.com"))
@@ -500,11 +500,11 @@ namespace GeminiWebTranslator
                         _messageCount = 0;
                     }
                 }
-                
+
                 _messageCount++;
-                Log($"프롬프트 전송 ({prompt.Length}자) [#{_messageCount}/{MaxMessagesPerChat}]" + 
+                Log($"프롬프트 전송 ({prompt.Length}자) [#{_messageCount}/{MaxMessagesPerChat}]" +
                     (_chatMetadata != null ? $" (채팅 재사용)" : " (새 채팅)"));
-                
+
                 // Gemini API의 복잡한 요청 데이터 구조 생성 (Python: [prompt], null, chat_metadata)
                 var innerData = new object?[] { new object[] { prompt }, null, _chatMetadata };
                 var innerJson = JsonSerializer.Serialize(innerData);
@@ -520,7 +520,7 @@ namespace GeminiWebTranslator
 
                 // API 호출 및 응답 확인
                 var response = await _httpClient.PostAsync(GenerateEndpoint, formContent);
-                
+
                 if (!response.IsSuccessStatusCode)
                 {
                     var errorContent = await response.Content.ReadAsStringAsync();
@@ -530,7 +530,7 @@ namespace GeminiWebTranslator
                 // 결과 파싱 및 chat metadata 추출
                 var responseText = await response.Content.ReadAsStringAsync();
                 var (parsedResponse, metadata, chatId) = ParseGeminiResponseWithMetadata(responseText);
-                
+
                 // 채팅 정보 저장 (다음 요청에 재사용)
                 if (metadata != null)
                 {
@@ -540,8 +540,8 @@ namespace GeminiWebTranslator
                 {
                     _currentChatId = chatId;
                 }
-                
-                Log($"응답 수신 ({parsedResponse.Length}자)" + 
+
+                Log($"응답 수신 ({parsedResponse.Length}자)" +
                     (!string.IsNullOrEmpty(_currentChatId) ? $" (cid: {_currentChatId.Substring(0, Math.Min(8, _currentChatId.Length))}...)" : ""));
                 return parsedResponse;
             }
@@ -558,7 +558,7 @@ namespace GeminiWebTranslator
         private bool IsAuthError(Exception ex)
         {
             var msg = ex.Message.ToLower();
-            return msg.Contains("401") || msg.Contains("403") || 
+            return msg.Contains("401") || msg.Contains("403") ||
                    msg.Contains("snlm0e") || msg.Contains("unauthorized") ||
                    msg.Contains("not logged in") || msg.Contains("login required");
         }
@@ -575,7 +575,7 @@ namespace GeminiWebTranslator
             catch (Exception ex) when (IsAuthError(ex))
             {
                 Log("⚠️ 인증 오류 감지, 쿠키 재추출 시도 중...");
-                
+
                 // 1단계: RotateCookies 시도
                 try
                 {
@@ -591,7 +591,7 @@ namespace GeminiWebTranslator
                 {
                     Log($"쿠키 갱신 실패: {rotateEx.Message}");
                 }
-                
+
                 // 2단계: WebView에서 숨겨진 쿠키 재추출
                 if (OnCookieRefreshNeeded != null)
                 {
@@ -612,7 +612,7 @@ namespace GeminiWebTranslator
                 {
                     Log("쿠키 재추출 콜백이 설정되지 않았습니다.");
                 }
-                
+
                 throw;
             }
         }
@@ -631,7 +631,7 @@ namespace GeminiWebTranslator
                     try
                     {
                         if (line.Trim().StartsWith("QUOTE_")) continue; // Skip quote lines if any
-                        
+
                         // 유효한 JSON 찾기 시도
                         if (line.Trim().StartsWith("[["))
                         {
@@ -645,7 +645,7 @@ namespace GeminiWebTranslator
                     }
                     catch { continue; }
                 }
-                
+
                 return "응답을 파싱할 수 없습니다. (JSON 형식 불일치)";
             }
             catch (Exception ex)
@@ -668,7 +668,7 @@ namespace GeminiWebTranslator
                     try
                     {
                         if (line.Trim().StartsWith("QUOTE_")) continue;
-                        
+
                         if (line.Trim().StartsWith("[["))
                         {
                             var jsonArray = JArray.Parse(line);
@@ -676,16 +676,16 @@ namespace GeminiWebTranslator
                             if (wrappedResponse != null)
                             {
                                 var parsedData = JArray.Parse(wrappedResponse.ToString());
-                                
+
                                 // 텍스트 추출
                                 var textContent = parsedData[4]?[0]?[1]?.ToString() ?? "";
-                                
+
                                 // 메타데이터 추출 (Python: body[1])
                                 var metadata = parsedData[1];
-                                
+
                                 // 채팅 ID 추출 (Python: body[1][0])
                                 var chatId = parsedData[1]?[0]?.ToString();
-                                
+
                                 if (!string.IsNullOrEmpty(textContent))
                                 {
                                     return (textContent, metadata, chatId);
@@ -695,7 +695,7 @@ namespace GeminiWebTranslator
                     }
                     catch { continue; }
                 }
-                
+
                 return ("응답을 파싱할 수 없습니다.", null, null);
             }
             catch (Exception ex)
@@ -741,7 +741,7 @@ namespace GeminiWebTranslator
         public async Task SaveCookiesAsync(string cookiePath, string secure1PSID, string? secure1PSIDTS = null, string? userAgent = null, string? model = null)
         {
             if (!string.IsNullOrEmpty(model)) _model = model;
-            
+
             string psid = secure1PSID;
             string? psidts = secure1PSIDTS;
 
@@ -776,13 +776,13 @@ namespace GeminiWebTranslator
             try
             {
                 Log("쿠키 갱신 시도...");
-                
+
                 using var request = new HttpRequestMessage(HttpMethod.Post, RotateCookiesEndpoint);
                 request.Headers.Add("Content-Type", "application/json");
                 request.Content = new StringContent("[000,\"-0000000000000000000\"]", Encoding.UTF8, "application/json");
 
                 var response = await _httpClient.SendAsync(request);
-                
+
                 if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
                 {
                     Log("쿠키 갱신 실패: 인증 오류 (401)");
@@ -829,10 +829,10 @@ namespace GeminiWebTranslator
             try
             {
                 Log($"프롬프트 전송 ({prompt.Length}자, 모델: {modelName})");
-                
+
                 // 모델 헤더 가져오기
                 var modelHeader = Models.GeminiModelConstants.GetModelHeader(modelName);
-                
+
                 // Gemini API의 복잡한 요청 데이터 구조 생성
                 var innerData = new object?[] { new object[] { prompt }, null, null };
                 var innerJson = JsonSerializer.Serialize(innerData);
@@ -849,14 +849,14 @@ namespace GeminiWebTranslator
                 // 모델 헤더가 있으면 요청에 추가
                 using var request = new HttpRequestMessage(HttpMethod.Post, GenerateEndpoint);
                 request.Content = formContent;
-                
+
                 if (!string.IsNullOrEmpty(modelHeader))
                 {
                     request.Headers.TryAddWithoutValidation("x-goog-ext-525001261-jspb", modelHeader);
                 }
 
                 var response = await _httpClient.SendAsync(request);
-                
+
                 if (!response.IsSuccessStatusCode)
                 {
                     var errorContent = await response.Content.ReadAsStringAsync();
@@ -865,7 +865,7 @@ namespace GeminiWebTranslator
 
                 var responseText = await response.Content.ReadAsStringAsync();
                 var parsedResponse = ParseGeminiResponse(responseText);
-                
+
                 Log($"응답 수신 ({parsedResponse.Length}자)");
                 return parsedResponse;
             }
@@ -891,7 +891,7 @@ namespace GeminiWebTranslator
             try
             {
                 Log($"이미지 업로드 중: {Path.GetFileName(filePath)}");
-                
+
                 // 파일 읽기 (WebView2 잠금 방지)
                 byte[] fileBytes;
                 using (var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
@@ -899,20 +899,20 @@ namespace GeminiWebTranslator
                     fileBytes = new byte[stream.Length];
                     await stream.ReadAsync(fileBytes, 0, fileBytes.Length);
                 }
-                
+
                 // Multipart 폼 데이터 구성
                 using var content = new MultipartFormDataContent();
                 var fileContent = new ByteArrayContent(fileBytes);
                 content.Add(fileContent, "file", Path.GetFileName(filePath));
-                
+
                 // 업로드 요청
                 using var request = new HttpRequestMessage(HttpMethod.Post, UploadEndpoint);
                 request.Headers.Add("Push-ID", "feeds/mcudyrk2a4khkz");
                 request.Content = content;
-                
+
                 var response = await _httpClient.SendAsync(request);
                 response.EnsureSuccessStatusCode();
-                
+
                 var fileId = await response.Content.ReadAsStringAsync();
                 Log($"업로드 완료: {fileId.Substring(0, Math.Min(50, fileId.Length))}...");
                 return fileId;
@@ -943,15 +943,15 @@ namespace GeminiWebTranslator
                 // 1. 이미지 업로드
                 Log($"이미지 편집 시작: {Path.GetFileName(imagePath)}");
                 var fileId = await UploadFileAsync(imagePath);
-                
+
                 // 2. 업로드된 이미지와 프롬프트로 생성 요청
                 // Python: [prompt, 0, None, [[[file_id], filename]]]
                 var filename = Path.GetFileName(imagePath);
-                var innerData = new object?[] 
-                { 
+                var innerData = new object?[]
+                {
                     new object[] { prompt, 0, null, new object[] { new object[] { new string[] { fileId }, filename } } },
-                    null, 
-                    _chatMetadata 
+                    null,
+                    _chatMetadata
                 };
                 var innerJson = JsonSerializer.Serialize(innerData);
                 var outerData = new object?[] { null, innerJson };
@@ -979,10 +979,10 @@ namespace GeminiWebTranslator
                 response.EnsureSuccessStatusCode();
 
                 var responseText = await response.Content.ReadAsStringAsync();
-                
+
                 // 3. 응답에서 이미지 URL 추출
                 var imageUrls = ExtractImageUrls(responseText);
-                
+
                 Log($"이미지 편집 완료: {imageUrls.Count}개 이미지 생성");
                 return imageUrls;
             }
@@ -999,7 +999,7 @@ namespace GeminiWebTranslator
         private List<string> ExtractImageUrls(string responseText)
         {
             var imageUrls = new List<string>();
-            
+
             // lh3.googleusercontent.com URL 패턴 찾기
             var matches = Regex.Matches(responseText, @"https://lh3\.googleusercontent\.com/[^\s\""']+", RegexOptions.IgnoreCase);
             foreach (Match match in matches)
@@ -1010,7 +1010,7 @@ namespace GeminiWebTranslator
                     imageUrls.Add(url);
                 }
             }
-            
+
             return imageUrls;
         }
 
@@ -1033,9 +1033,9 @@ namespace GeminiWebTranslator
                 }
 
                 Log($"이미지 생성 요청: {prompt}");
-                
+
                 var response = await GenerateContentWithModelAsync(prompt, modelName);
-                
+
                 // 응답에서 이미지 URL 추출
                 return ExtractImageUrls(response);
             }

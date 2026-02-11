@@ -36,9 +36,12 @@ public class TranslationSettingsFormEx : Form
     private Button btnSaveGlossary = null!;
     private GroupBox grpGlossary = null!;
 
-    // 프롬프트
-    private CheckBox chkCustomPrompt = null!;
-    private TextBox txtCustomPrompt = null!;
+    // 출력 미리보기 + 프롬프트 설정
+    private TextBox txtOutputPreview = null!;
+    private Label lblOutputPreviewPath = null!;
+    private Button btnPromptSettings = null!;
+    private bool _customPromptEnabled;
+    private string _customPromptText = string.Empty;
 
     private Button btnApply = null!;
     private Button btnCancel = null!;
@@ -56,8 +59,8 @@ public class TranslationSettingsFormEx : Form
     public TranslationSettings Settings => _settings;
     public string TargetLanguage => cmbTargetLang.SelectedItem?.ToString()?.Split('(')[0].Trim() ?? "한국어";
     public string TranslationStyle => cmbStyle.SelectedItem?.ToString() ?? "자연스럽게";
-    public bool UseCustomPrompt => chkCustomPrompt.Checked && !string.IsNullOrWhiteSpace(txtCustomPrompt.Text);
-    public string CustomPromptText => txtCustomPrompt.Text.Trim();
+    public bool UseCustomPrompt => _customPromptEnabled && !string.IsNullOrWhiteSpace(_customPromptText);
+    public string CustomPromptText => _customPromptText.Trim();
     public string? GlossaryPath => _glossaryPath;
     public string? LoadedFilePath => _loadedFilePath;
     public string? LoadedFileContent => txtFilePreview?.Text;
@@ -66,12 +69,19 @@ public class TranslationSettingsFormEx : Form
 
     #endregion
 
-    public TranslationSettingsFormEx(TranslationSettings? currentSettings = null)
+    public TranslationSettingsFormEx(
+        TranslationSettings? currentSettings = null,
+        string? customPrompt = null,
+        bool customPromptEnabled = false)
     {
         _settings = currentSettings ?? new TranslationSettings();
+        _customPromptText = customPrompt?.Trim() ?? string.Empty;
+        _customPromptEnabled = customPromptEnabled && !string.IsNullOrWhiteSpace(_customPromptText);
         InitializeComponent();
         ApplyTheme();
         LoadGlossaryToGrid();
+        UpdatePromptButtonState();
+        UpdateOutputPreview();
         this.TopMost = MainForm.IsAlwaysOnTop;
     }
 
@@ -126,6 +136,7 @@ public class TranslationSettingsFormEx : Form
             txtFilePreview.Clear();
             lblFileName.Text = "파일이 로드되지 않음";
             lblFileName.ForeColor = UiTheme.ColorTextMuted;
+            UpdateOutputPreview();
         };
         lblFileName = new Label { Text = "파일이 로드되지 않음", AutoSize = true, Margin = new Padding(10, 10, 0, 0) };
         filePanel.Controls.AddRange(new Control[] { btnLoadFile, btnCloseFile, lblFileName });
@@ -234,33 +245,39 @@ public class TranslationSettingsFormEx : Form
         grpGlossary.Controls.Add(glossaryLayout);
         rightPanel.Controls.Add(grpGlossary, 0, 0);
 
-        // 커스텀 프롬프트
-        var grpPrompt = new GroupBox { Text = "커스텀 프롬프트", Dock = DockStyle.Fill };
-        var promptLayout = new TableLayoutPanel
+        // 출력 파일 미리보기 (읽기 전용)
+        var grpOutputPreview = new GroupBox { Text = "출력 파일 미리보기 (읽기 전용)", Dock = DockStyle.Fill };
+        var previewLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             RowCount = 2,
             ColumnCount = 1
         };
-        promptLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        promptLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        previewLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+        previewLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-        chkCustomPrompt = new CheckBox { Text = "커스텀 프롬프트 사용", Dock = DockStyle.Fill };
-        chkCustomPrompt.CheckedChanged += (s, e) => txtCustomPrompt.Enabled = chkCustomPrompt.Checked;
-        promptLayout.Controls.Add(chkCustomPrompt, 0, 0);
+        lblOutputPreviewPath = new Label
+        {
+            Text = "출력 파일 경로: (파일 없음)",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoEllipsis = true
+        };
+        previewLayout.Controls.Add(lblOutputPreviewPath, 0, 0);
 
-        txtCustomPrompt = new TextBox
+        txtOutputPreview = new TextBox
         {
             Dock = DockStyle.Fill,
             Multiline = true,
-            ScrollBars = ScrollBars.Vertical,
+            ScrollBars = ScrollBars.Both,
             Font = new Font("Consolas", 9.5F),
-            Enabled = false
+            ReadOnly = true,
+            WordWrap = false
         };
-        promptLayout.Controls.Add(txtCustomPrompt, 0, 1);
+        previewLayout.Controls.Add(txtOutputPreview, 0, 1);
 
-        grpPrompt.Controls.Add(promptLayout);
-        rightPanel.Controls.Add(grpPrompt, 0, 1);
+        grpOutputPreview.Controls.Add(previewLayout);
+        rightPanel.Controls.Add(grpOutputPreview, 0, 1);
 
         // 하단 버튼
         var buttonPanel = new FlowLayoutPanel
@@ -269,12 +286,15 @@ public class TranslationSettingsFormEx : Form
             FlowDirection = FlowDirection.RightToLeft,
             Padding = new Padding(0, 5, 0, 0)
         };
+
+        btnPromptSettings = CreateButton("🛠 프롬프트", 110);
+        btnPromptSettings.Click += BtnPromptSettings_Click;
         btnCancel = CreateButton("취소", 90);
         btnCancel.Click += (s, e) => { DialogResult = DialogResult.Cancel; Close(); };
         btnApply = CreateButton("✅ 적용", 90);
         btnApply.BackColor = Color.FromArgb(80, 200, 120);
         btnApply.Click += BtnApply_Click;
-        buttonPanel.Controls.AddRange(new Control[] { btnCancel, btnApply });
+        buttonPanel.Controls.AddRange(new Control[] { btnCancel, btnApply, btnPromptSettings });
         rightPanel.Controls.Add(buttonPanel, 0, 2);
 
         mainSplit.Panel2.Controls.Add(rightPanel);
@@ -312,8 +332,9 @@ public class TranslationSettingsFormEx : Form
         dgvGlossary.EnableHeadersVisualStyles = false;
         txtFilePreview.BackColor = UiTheme.ColorBackground;
         txtFilePreview.ForeColor = Color.White;
-        txtCustomPrompt.BackColor = UiTheme.ColorBackground;
-        txtCustomPrompt.ForeColor = Color.White;
+        txtOutputPreview.BackColor = UiTheme.ColorBackground;
+        txtOutputPreview.ForeColor = Color.White;
+        lblOutputPreviewPath.ForeColor = UiTheme.ColorTextMuted;
     }
 
     #region Event Handlers
@@ -336,11 +357,23 @@ public class TranslationSettingsFormEx : Form
 
                 // 자동 저장 경로 생성
                 var dir = Path.GetDirectoryName(ofd.FileName) ?? "";
-                var name = "translated_" + Path.GetFileName(ofd.FileName);
-                _savePath = Path.Combine(dir, name);
+                var ext = Path.GetExtension(ofd.FileName).ToLowerInvariant();
+                if (ext == ".tsv")
+                {
+                    var baseName = Path.GetFileNameWithoutExtension(ofd.FileName);
+                    _savePath = baseName.EndsWith("_ko", StringComparison.OrdinalIgnoreCase)
+                        ? ofd.FileName
+                        : Path.Combine(dir, $"{baseName}_ko.tsv");
+                }
+                else
+                {
+                    var name = "translated_" + Path.GetFileName(ofd.FileName);
+                    _savePath = Path.Combine(dir, name);
+                }
 
                 lblFileName.Text = $"✅ {Path.GetFileName(ofd.FileName)} ({new FileInfo(ofd.FileName).Length / 1024}KB)";
                 lblFileName.ForeColor = UiTheme.ColorSuccess;
+                UpdateOutputPreview();
 
                 // [Phase 2] 같은 폴더의 glossary*.json 자동 감지
                 if (_settings.Glossary.Count == 0)
@@ -449,6 +482,17 @@ public class TranslationSettingsFormEx : Form
         Close();
     }
 
+    private void BtnPromptSettings_Click(object? sender, EventArgs e)
+    {
+        using var promptForm = new TranslationPromptSettingsForm(_customPromptText, _customPromptEnabled);
+        if (promptForm.ShowDialog(this) == DialogResult.OK)
+        {
+            _customPromptEnabled = promptForm.IsEnabled;
+            _customPromptText = promptForm.PromptText;
+            UpdatePromptButtonState();
+        }
+    }
+
     #endregion
 
     #region Helpers
@@ -510,6 +554,91 @@ public class TranslationSettingsFormEx : Form
             }
         }
         catch { /* 무시 */ }
+    }
+
+    private void UpdatePromptButtonState()
+    {
+        if (btnPromptSettings == null) return;
+        btnPromptSettings.Text = _customPromptEnabled
+            ? $"🛠 프롬프트 ({_customPromptText.Length})"
+            : "🛠 프롬프트";
+    }
+
+    private void UpdateOutputPreview()
+    {
+        if (txtOutputPreview == null || lblOutputPreviewPath == null)
+            return;
+
+        if (string.IsNullOrWhiteSpace(_loadedFilePath))
+        {
+            lblOutputPreviewPath.Text = "출력 파일 경로: (파일 없음)";
+            txtOutputPreview.Text = "파일을 로드하면 출력 파일 내용을 읽기 전용으로 미리 볼 수 있습니다.";
+            return;
+        }
+
+        string outputPath = ResolveOutputPreviewPath(_loadedFilePath);
+        lblOutputPreviewPath.Text = $"출력 파일 경로: {outputPath}";
+
+        if (!File.Exists(outputPath))
+        {
+            txtOutputPreview.Text = "아직 출력 파일이 생성되지 않았습니다.\r\n번역을 시작하면 이 영역에서 결과 파일 내용을 읽기 전용으로 확인할 수 있습니다.";
+            return;
+        }
+
+        try
+        {
+            txtOutputPreview.Text = ReadFilePreview(outputPath);
+        }
+        catch (Exception ex)
+        {
+            txtOutputPreview.Text = $"출력 파일 미리보기 로드 실패:\r\n{ex.Message}";
+        }
+    }
+
+    private string ResolveOutputPreviewPath(string inputPath)
+    {
+        string directory = Path.GetDirectoryName(inputPath) ?? string.Empty;
+        string fileName = Path.GetFileNameWithoutExtension(inputPath);
+        string extension = Path.GetExtension(inputPath);
+
+        if (extension.Equals(".tsv", StringComparison.OrdinalIgnoreCase))
+        {
+            return fileName.EndsWith("_ko", StringComparison.OrdinalIgnoreCase)
+                ? inputPath
+                : Path.Combine(directory, $"{fileName}_ko{extension}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(_savePath))
+        {
+            return _savePath;
+        }
+
+        return Path.Combine(directory, "translated_" + Path.GetFileName(inputPath));
+    }
+
+    private static string ReadFilePreview(string path, int maxLines = 800, int maxChars = 120000)
+    {
+        var sb = new System.Text.StringBuilder();
+        using var reader = new StreamReader(path, true);
+
+        int lineCount = 0;
+        while (!reader.EndOfStream && lineCount < maxLines && sb.Length < maxChars)
+        {
+            var line = reader.ReadLine();
+            if (line == null)
+                break;
+
+            sb.AppendLine(line);
+            lineCount++;
+        }
+
+        if (!reader.EndOfStream)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"... (미리보기는 처음 {lineCount}줄까지만 표시됩니다)");
+        }
+
+        return sb.ToString();
     }
 
     #endregion

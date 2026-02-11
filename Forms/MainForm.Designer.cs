@@ -45,7 +45,7 @@ public partial class MainForm
         try
         {
             // WebView 모드를 기본으로 활성화 (설정 창은 열지 않음)
-            useWebView2Mode = true;
+            ActiveMode = Models.TranslationMode.WebView;
             UpdateModeButtonsUI(btnModeWebView);
             if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
 
@@ -164,7 +164,7 @@ public partial class MainForm
         if (txtInput != null) UiTheme.StyleRichTextBox(txtOutput); // Ensure RichTextBox gets correct colors
 
         // Update mode buttons highlight
-        UpdateModeButtonsUI(useWebView2Mode ? btnModeWebView : (chkHttpMode.Checked ? btnModeHttp : null));
+        UpdateModeUI();
     }
 
     private void CreateMainWorkspace(Control parent)
@@ -328,7 +328,7 @@ public partial class MainForm
             // Gemini 응답 생성도 함께 중지
             try
             {
-                if (useWebView2Mode && automation != null)
+                if (ActiveMode == Models.TranslationMode.WebView && automation != null)
                 {
                     _ = automation.StopGeminiResponseAsync();
                 }

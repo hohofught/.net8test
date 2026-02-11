@@ -177,7 +177,7 @@ public class TranslationContext
     /// </summary>
     public int GetOptimalChunkSize(bool isWebViewMode = false)
     {
-        int baseLimit = isWebViewMode ? 2900 : 5900;
+        int baseLimit = 3000;
         if (AverageResponseTimeMs > 5000) return (int)(baseLimit * 0.6);
         if (AverageResponseTimeMs > 3000) return (int)(baseLimit * 0.8);
         return baseLimit;

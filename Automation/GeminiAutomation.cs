@@ -15,10 +15,10 @@ public class GeminiAutomation : IGeminiAutomation
     private const int MaxWaitSeconds = 120; // 서버 응답 최대 대기 시간 (초)
     private const int PollIntervalMs = 80;  // 브라우저 상태 확인 간격 (ms)
     private readonly SemaphoreSlim _lock = new(1, 1); // 동시성 제어를 위한 세마포어
-    
+
     // 빈번한 스크립트 생성을 고려한 리소스 최적화용 빌더
     private readonly StringBuilder _scriptBuilder = new(2048);
-    
+
     // === MORT 패턴: 세션 홀드 메커니즘 ===
     // 세션 갱신 중 상태 관리 (번역 요청 대기용)
     private volatile bool _isRefreshing = false;
@@ -26,25 +26,25 @@ public class GeminiAutomation : IGeminiAutomation
     private readonly object _refreshLock = new();
     private const int SESSION_REFRESH_INTERVAL = 15;  // N회 번역마다 세션 새로고침
     private int _translationCount = 0;
-    
+
     /// <summary>
     /// 작업 진행 상황이나 오류 로그를 외부로 전달하는 이벤트입니다.
     /// </summary>
     public event Action<string>? OnLog;
     private void Log(string message) => OnLog?.Invoke($"[WebView2] {message}");
-    
+
     /// <summary>
     /// 스트리밍 업데이트 이벤트 - 생성 중인 부분 결과를 외부에 전달 (MORT 패턴)
     /// 오버레이 UI나 상태 표시에서 실시간 번역 결과를 표시할 때 사용합니다.
     /// </summary>
     public event Action<string>? OnStreamingUpdate;
-    
+
     /// <summary>
     /// 모델 감지 이벤트 - 번역 시 실제 사용 중인 모델 정보를 전달
     /// 헤더 ID 기반으로 현재 활성화된 Gemini 모델을 감지합니다.
     /// </summary>
     public event Action<GeminiModelInfo>? OnModelDetected;
-    
+
     /// <summary>
     /// 마지막으로 감지된 모델 정보 (캐시)
     /// </summary>
@@ -54,7 +54,7 @@ public class GeminiAutomation : IGeminiAutomation
     {
         _webView = webView;
     }
-    
+
     /// <summary>
     /// WebView2 엔진이 초기화되어 있고 폼 핸들이 있는 경우 연결된 것으로 간주
     /// </summary>
@@ -108,6 +108,9 @@ public class GeminiAutomation : IGeminiAutomation
                 await Task.Delay(200);
             }
 
+            // === P1-6: about:blank 네비게이션 가드 백그라운드 실행 ===
+            _ = EnsureGeminiNavigationAsync();
+
             Log("WebView2 및 Gemini 서비스 준비 완료.");
             return true;
         }
@@ -130,31 +133,42 @@ public class GeminiAutomation : IGeminiAutomation
     public async Task<GeminiModelInfo> GetCurrentModelAsync()
     {
         var result = new GeminiModelInfo();
-        
+
         if (_webView?.CoreWebView2 == null)
         {
             result.ModelName = "not_initialized";
             result.DetectionMethod = "webview_null";
             return result;
         }
-        
+
         try
         {
             var json = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.GetCurrentModelScript);
-            
+
             if (!string.IsNullOrEmpty(json) && json != "null")
             {
                 // JSON 파싱 (간단한 수동 파싱)
                 json = json.Trim('"').Replace("\\\"", "\"");
-                
+
                 // System.Text.Json 사용
                 var options = new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true };
                 var parsed = System.Text.Json.JsonSerializer.Deserialize<GeminiModelInfo>(json, options);
-                
+
                 if (parsed != null)
                 {
                     result = parsed;
-                    Log($"[Model] 감지됨: {result.ModelName} (v{result.ModelVersion}) via {result.DetectionMethod}");
+
+                    // [Fix] 모델 정보가 변경되었을 때만 로그 출력 및 이벤트 발생 (중복 방지)
+                    bool isChanged = LastDetectedModel == null ||
+                                    LastDetectedModel.ModelName != result.ModelName ||
+                                    LastDetectedModel.IsLoggedIn != result.IsLoggedIn;
+
+                    if (isChanged)
+                    {
+                        LastDetectedModel = result;
+                        Log($"[Model] 감지됨: {result.ModelName} (v{result.ModelVersion}) via {result.DetectionMethod}");
+                        OnModelDetected?.Invoke(result);
+                    }
                 }
             }
         }
@@ -164,7 +178,7 @@ public class GeminiAutomation : IGeminiAutomation
             result.RawText = ex.Message;
             Log($"[Model] 감지 오류: {ex.Message}");
         }
-        
+
         return result;
     }
 
@@ -188,7 +202,7 @@ public class GeminiAutomation : IGeminiAutomation
                 return "⏳ 새로고침 중...";  // MORT 패턴: 즉시 반환
             }
         }
-        
+
         if (!await _lock.WaitAsync(0))
         {
             Log("이전 번역이 아직 진행 중입니다. 대기 명령을 무시합니다.");
@@ -200,7 +214,7 @@ public class GeminiAutomation : IGeminiAutomation
             // 번역 카운트 증가
             _translationCount++;
             Log($"[Session] 번역 #{_translationCount} (새 세션 필요: {_translationCount >= SESSION_REFRESH_INTERVAL})");
-            
+
             // === MORT 패턴: 세션 자동 갱신 (동기 폴링) ===
             if (_translationCount >= SESSION_REFRESH_INTERVAL)
             {
@@ -210,10 +224,10 @@ public class GeminiAutomation : IGeminiAutomation
                     _isRefreshing = true;
                     _pendingPrompt = null;  // 이전 대기 프롬프트 초기화
                 }
-                
+
                 Log("[Session] 세션 자동 갱신 시작 (품질 유지)");
                 OnStreamingUpdate?.Invoke("⏳ 세션 새로고침 중...");
-                
+
                 try
                 {
                     // 페이지 새로고침
@@ -221,11 +235,11 @@ public class GeminiAutomation : IGeminiAutomation
                     {
                         _webView.CoreWebView2.Reload();
                     }
-                    
+
                     // === MORT 패턴: 즉시 확인 먼저 수행 ===
                     await Task.Delay(1500);  // 최소 로딩 시간 대기
                     bool refreshSuccess = false;
-                    
+
                     // 즉시 확인
                     try
                     {
@@ -240,7 +254,7 @@ public class GeminiAutomation : IGeminiAutomation
                         }
                     }
                     catch { }
-                    
+
                     // === 아직 준비되지 않은 경우에만 폴링 대기 (최대 13.5초) ===
                     if (!refreshSuccess)
                     {
@@ -255,7 +269,7 @@ public class GeminiAutomation : IGeminiAutomation
                                     if (ready == "true")
                                     {
                                         refreshSuccess = true;
-                                        Log($"[Session] 세션 갱신 완료 ({1500 + (i+1)*200}ms 후)");
+                                        Log($"[Session] 세션 갱신 완료 ({1500 + (i + 1) * 200}ms 후)");
                                         break;
                                     }
                                 }
@@ -263,9 +277,9 @@ public class GeminiAutomation : IGeminiAutomation
                             catch { }
                         }
                     }
-                    
+
                     _translationCount = 0;  // 카운트 리셋
-                    
+
                     if (refreshSuccess)
                     {
                         Log("[Session] 세션 갱신 완료 - 페이지 로드 확인됨");
@@ -286,7 +300,7 @@ public class GeminiAutomation : IGeminiAutomation
                     lock (_refreshLock)
                     {
                         _isRefreshing = false;
-                        
+
                         // 세션 갱신 중 새 프롬프트가 들어왔다면 그것을 번역
                         if (!string.IsNullOrEmpty(_pendingPrompt) && _pendingPrompt != prompt)
                         {
@@ -297,7 +311,7 @@ public class GeminiAutomation : IGeminiAutomation
                     }
                 }
             }
-            
+
             // 실행 전 엔진 준비 상태 확인 및 대기
             bool isReady = await EnsureReadyAsync();
             if (!isReady)
@@ -308,20 +322,20 @@ public class GeminiAutomation : IGeminiAutomation
             // 메시지 전송 시작 (prompt.Length자)
             Log($"메시지 전송 시작 ({prompt.Length}자)");
             OnStreamingUpdate?.Invoke("📤 전송 중...");
-            
+
             // === 실시간 모델 감지 (번역 전) ===
             try
             {
                 var currentModel = await GetCurrentModelAsync();
                 LastDetectedModel = currentModel;
                 OnModelDetected?.Invoke(currentModel);
-                
+
                 // 헤더 ID 기반 감지 결과 상세 로그
-                var headerInfo = currentModel.DetectionMethod == "header-id" 
-                    ? $"(헤더 ID 검증됨)" 
+                var headerInfo = currentModel.DetectionMethod == "header-id"
+                    ? $"(헤더 ID 검증됨)"
                     : $"(감지 방법: {currentModel.DetectionMethod})";
                 Log($"[Model] 사용 모델: {currentModel.ModelName} v{currentModel.ModelVersion} {headerInfo}");
-                
+
                 // 2.5 Flash가 감지되었다면 경고 (현재 비활성)
                 if (currentModel.ModelName.Contains("2.5"))
                 {
@@ -332,32 +346,34 @@ public class GeminiAutomation : IGeminiAutomation
             {
                 Log($"[Model] 감지 오류 (번역은 계속됨): {modelEx.Message}");
             }
-            
+
             // 새 응답 시작을 감지하기 위해 현재 답변 항목의 개수를 미리 확인
             int preCount = await GetResponseCountAsync();
-            
+
             // 브라우저에 텍스트 주입 및 전송 버튼 트리거
             await SendMessageAsync(prompt);
-            
+
             OnStreamingUpdate?.Invoke("⏳ 생성 중...");
-            
+
             // 답변 생성이 완료될 때까지 상태 폴링 대기
-            var response = await WaitForResponseAsync(preCount);
-            
-            // 타임아웃/오류 감지 시 자동 복구 시도
+            var response = await WaitForResponseAfterSendAsync(preCount);
+
+            // 타임아웃/오류 감지 시 카운터만 증가 (복구는 호출자에게 위임)
+            // ⚠️ HandleTimeoutAsync() 직접 호출 금지: _lock 교착 상태 발생
+            // (StartNewChatAsync가 _lock 재획득을 시도하므로 Deadlock)
             if (response.Contains("응답 없음") || response.Contains("시간 초과") || response.Contains("대기 시간"))
             {
-                Log("타임아웃 감지 - 자동 복구 시도 중...");
-                await HandleTimeoutAsync();
-                // 복구 후 딜레이
-                await Task.Delay(1000);
+                _consecutiveTimeouts++;
+                Log($"[WebView2] 타임아웃 감지 (연속 {_consecutiveTimeouts}회) - 호출자에게 복구 위임");
+                await Task.Delay(500);
             }
             else
             {
+                _consecutiveTimeouts = 0; // 정상 응답 시 카운터 리셋
                 // 정상 응답 후 Rate Limiting 방지를 위한 짧은 딜레이
                 await Task.Delay(300);
             }
-            
+
             Log($"메시지 수신 완료 ({response.Length}자)");
             return response;
         }
@@ -374,17 +390,29 @@ public class GeminiAutomation : IGeminiAutomation
     /// 세션 갱신 중인지 확인합니다.
     /// </summary>
     public bool IsRefreshing => _isRefreshing;
-    
+
     /// <summary>
     /// 현재 번역 카운트를 반환합니다.
     /// </summary>
     public int TranslationCount => _translationCount;
-    
-    public async Task StartNewChatAsync()
+
+    public async Task StartNewChatAsync(bool skipLock = false)
     {
-        if (!await _lock.WaitAsync(0))
+        bool lockAcquired = false;
+        if (!skipLock)
         {
-            await _lock.WaitAsync(); // 진행 중인 작업이 있다면 종료될 때까지 대기
+            // 외부 호출: 5초 타임아웃으로 lock 시도 (교착 방지)
+            lockAcquired = await _lock.WaitAsync(5000);
+            if (!lockAcquired)
+            {
+                Log("[Session] ⚠️ Lock 획득 실패 (5초 타임아웃) - 강제 새로고침으로 전환");
+                // lock을 못 잡아도 페이지 새로고침은 시도 (교착 탈출)
+                if (_webView.CoreWebView2 != null)
+                {
+                    _webView.CoreWebView2.Navigate("https://gemini.google.com/app");
+                }
+                return;
+            }
         }
 
         try
@@ -396,7 +424,7 @@ public class GeminiAutomation : IGeminiAutomation
                 _pendingPrompt = null;  // 이전 대기 프롬프트 초기화
             }
             Log("[Session] 세션 갱신 시작 (홀드 활성화)");
-            
+
             // 실행 전 엔진 준비 상태 확인 및 대기
             _ = await EnsureReadyAsync(); // 반환값 무시 (새 채팅은 어차피 새로 로드)
 
@@ -405,33 +433,33 @@ public class GeminiAutomation : IGeminiAutomation
             {
                 _webView.CoreWebView2.Navigate("https://gemini.google.com/app");
             }
-            
+
             await Task.Delay(1000); // 초기 로딩 안정화 시간 부여
 
             // 입력창이 활성화되어 타이핑이 가능한 상태가 될 때까지 확인 (최대 15초)
             bool inputReady = false;
             for (int i = 0; i < 100; i++)
             {
-                try 
+                try
                 {
                     if (_webView.CoreWebView2 != null)
                     {
                         var ready = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.CheckInputReadyScript);
-                        if (ready == "true") 
+                        if (ready == "true")
                         {
                             inputReady = true;
                             break;
                         }
-                        
+
                         // 5초 간격으로 로그인 만료 상태 여부 점검 (경고만 표시하고 진행)
                         if (i % 30 == 0)
                         {
-                             var loginCheck = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.LoginCheckScript);
-                             if (loginCheck == "\"login_needed\"")
-                             {
-                                 Log("경고: 로그인 상태 확인이 필요할 수 있습니다.");
-                                 // throw new Exception("세션이 만료되었습니다. 다시 로그인해 주세요."); // 사용자 요청으로 에러 미발생
-                             }
+                            var loginCheck = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.LoginCheckScript);
+                            if (loginCheck == "\"login_needed\"")
+                            {
+                                Log("경고: 로그인 상태 확인이 필요할 수 있습니다.");
+                                // throw new Exception("세션이 만료되었습니다. 다시 로그인해 주세요."); // 사용자 요청으로 에러 미발생
+                            }
                         }
                     }
                 }
@@ -439,18 +467,18 @@ public class GeminiAutomation : IGeminiAutomation
                 {
                     Log("로그인 관련 경고 무시됨");
                 }
-                catch 
-                { 
+                catch
+                {
                     // 로딩 중간 단계에서의 스크립트 실행 실패는 무시하고 재시도
                 }
-                
+
                 await Task.Delay(150);
             }
-            
+
             if (!inputReady)
             {
                 Log("경고: 제어 시간 내에 입력 인터페이스가 활성화되지 않았습니다.");
-                
+
                 // 구체적인 원인 파악을 위한 추가 진단 스크립트 실행
                 string isLoginNeeded = "no";
                 if (_webView.CoreWebView2 != null)
@@ -459,13 +487,13 @@ public class GeminiAutomation : IGeminiAutomation
                         document.body.innerText.includes('Sign in') || 
                         document.body.innerText.includes('로그인') ? 'yes' : 'no'");
                 }
-                
+
                 if (isLoginNeeded == "\"yes\"")
                     throw new Exception("Gemini 로그인이 필요합니다. '브라우저 창 보기'에서 로그인을 진행해 주세요.");
-                    
+
                 throw new Exception("페이지 로딩 후 입력창 응답이 없습니다. 네트워크 상태를 확인해 주세요.");
             }
-            
+
             Log("새 대화 준비가 완료되었습니다.");
         }
         finally
@@ -477,7 +505,7 @@ public class GeminiAutomation : IGeminiAutomation
                 _translationCount = 0;  // 번역 카운트 리셋
                 Log($"[Session] 세션 갱신 완료 (홀드 해제, 대기 프롬프트: {(_pendingPrompt != null ? "있음" : "없음")})");
             }
-            _lock.Release();
+            if (lockAcquired) _lock.Release();
         }
     }
 
@@ -492,9 +520,9 @@ public class GeminiAutomation : IGeminiAutomation
         {
             // 이미지 첨부 모드: 특별한 처리 필요
             Log("이미지 첨부 모드로 프롬프트 전송...");
-            
+
             var cleanPrompt = EscapeJsString(prompt);
-            
+
             // 1. 첨부 파일이 있는지 먼저 확인
             var hasAttachment = await _webView.CoreWebView2.ExecuteScriptAsync(@"
                 (function() {
@@ -512,7 +540,7 @@ public class GeminiAutomation : IGeminiAutomation
                 })()
             ");
             Log($"첨부 파일 확인: {hasAttachment}");
-            
+
             // 2. 입력창에 텍스트 삽입 (기존 내용 유지, placeholder만 대체)
             var insertScript = $@"
                 (async function() {{
@@ -555,13 +583,13 @@ public class GeminiAutomation : IGeminiAutomation
                     
                     return 'text_inserted';
                 }})()";
-            
+
             var insertResult = await _webView.CoreWebView2.ExecuteScriptAsync(insertScript);
             Log($"텍스트 삽입 결과: {insertResult}");
-            
+
             // 3. 잠시 대기 후 전송 버튼 활성화 확인
             await Task.Delay(500);
-            
+
             // 4. 전송 버튼 클릭 (활성화될 때까지 대기)
             var sendScript = @"
                 (async function() {
@@ -579,10 +607,10 @@ public class GeminiAutomation : IGeminiAutomation
                     }
                     return 'button_not_ready';
                 })()";
-            
+
             var sendResult = await _webView.CoreWebView2.ExecuteScriptAsync(sendScript);
             Log($"전송 결과: {sendResult}");
-            
+
             return sendResult.Contains("sent");
         }
         else
@@ -604,7 +632,7 @@ public class GeminiAutomation : IGeminiAutomation
             _scriptBuilder.Append(@");
                 return true;
             })();");
-            
+
             if (_webView?.CoreWebView2 != null)
             {
                 await _webView.CoreWebView2.ExecuteScriptAsync(_scriptBuilder.ToString());
@@ -635,21 +663,66 @@ public class GeminiAutomation : IGeminiAutomation
     /// <summary>
     /// 모델의 답변 작성이 완료될 때까지 상태를 모니터링합니다.
     /// 답변 내용의 변화 유무와 시스템의 '생성 중' 플래그를 조합하여 완료 시점을 결정합니다.
+    /// [P0] 기준선 stale 감지, 동적 폴링, Stuck 부분응답 반환 적용.
     /// </summary>
     /// <param name="timeoutSeconds">응답 대기 최대 시간 (초)</param>
     /// <returns>최종 완성된 답변 텍스트</returns>
     public async Task<string> WaitForResponseAsync(int timeoutSeconds = 120)
     {
         int minCount = await GetResponseCountAsync();
+        return await WaitForResponseInternalAsync(minCount, timeoutSeconds);
+    }
+
+    /// <summary>
+    /// 메시지 전송 직후 preCount를 기준으로 새 응답을 감지합니다.
+    /// </summary>
+    private async Task<string> WaitForResponseAfterSendAsync(int minCount, int timeoutSeconds = MaxWaitSeconds)
+    {
+        return await WaitForResponseInternalAsync(minCount, timeoutSeconds);
+    }
+
+    /// <summary>
+    /// 내부 응답 대기 로직 (기준 응답 수 + 타임아웃 전달)
+    /// </summary>
+    private async Task<string> WaitForResponseInternalAsync(int minCount, int timeoutSeconds)
+    {
         var startTime = DateTime.Now;
         var lastChangeTime = DateTime.Now; // 내용에 변화가 있었던 마지막 시각
         string lastResponse = "";
         int stableCount = 0; // 내용 불변 상태를 유지한 횟수
-        const int MaxInactiveSeconds = 30; // 30초 이상 응답 변화가 없으면 장애로 판단
+        int pollCount = 0;
+        int maxWait = timeoutSeconds > 0 ? timeoutSeconds : MaxWaitSeconds;
 
-        while ((DateTime.Now - startTime).TotalSeconds < MaxWaitSeconds)
+        // === P0-1: Stuck 부분응답 반환 + 에스컬레이션 ===
+        const int MaxStuckSeconds = 15;       // 생성 중 15초 무변화 시 Stuck 판정
+        const int MaxInactiveSeconds = 30;    // 30초 이상 응답 변화 없으면 장애로 판단
+        bool responseStarted = false;
+
+        // === P0-3: 동적 폴링 간격 ===
+        int currentPollInterval = PollIntervalMs;   // 기본 ~80ms
+        const int PollSlowInterval = 500;           // 변화 없음 3초 이상
+        const int PollVerySlowInterval = 1000;      // 변화 없음 5초 이상
+
+        // === P0-2: 기준선 stale 감지 ===
+        string baselineResponse = await GetLatestResponseAsync();
+        int baselineLength = baselineResponse?.Length ?? 0;
+        bool newResponseDetected = (baselineLength == 0 && minCount == 0);
+        bool staleNoiseLogged = false;
+        if (baselineLength > 0)
         {
-            await Task.Delay(PollIntervalMs);
+            Log($"[WaitForResponse] 기준선 캡처: {baselineLength}자 (stale 필터 활성)");
+        }
+
+        while ((DateTime.Now - startTime).TotalSeconds < maxWait)
+        {
+            await Task.Delay(currentPollInterval);
+            pollCount++;
+
+            // === P1-4: 로그인 프롬프트 주기적 체크 (10회마다) ===
+            if (pollCount % 10 == 0)
+            {
+                await CheckAndDismissLoginPromptsAsync();
+            }
 
             try
             {
@@ -657,20 +730,89 @@ public class GeminiAutomation : IGeminiAutomation
                 var currentCount = await GetResponseCountAsync();
                 var isGenerating = await IsGeneratingAsync();
 
-                // 텍스트 변화가 있거나 상태 플래그가 '생성 중'인 경우 진행 중으로 간주
-                if (currentResponse != lastResponse || isGenerating)
+                // === P0-2: 기준선 stale 필터링 강화 ===
+                if (!newResponseDetected)
+                {
+                    bool countIncreased = currentCount > minCount;
+                    bool materiallyDifferent = !string.Equals(currentResponse, baselineResponse, StringComparison.Ordinal) &&
+                                              !string.IsNullOrWhiteSpace(currentResponse) &&
+                                              Math.Abs(currentResponse.Length - baselineLength) >= Math.Max(40, (int)(baselineLength * 0.5));
+                    bool candidateFromEmptyBaseline = baselineLength == 0 &&
+                                                      !string.IsNullOrWhiteSpace(currentResponse) &&
+                                                      !TranslationCleaner.IsPossibleMetaText(currentResponse);
+
+                    if (countIncreased || isGenerating || materiallyDifferent || candidateFromEmptyBaseline)
+                    {
+                        newResponseDetected = true;
+                        responseStarted = false;
+                        lastChangeTime = DateTime.Now;
+                        stableCount = 0;
+
+                        string reason = countIncreased ? "responseCount 증가" :
+                                        isGenerating ? "생성중 신호 감지" :
+                                        materiallyDifferent ? "기준선 대비 유의미한 길이 변화" :
+                                        "기준선 없음 + 유효 텍스트";
+                        Log($"[WaitForResponse] 새 응답 시작 확정: {reason} (len={currentResponse.Length}, count={currentCount}>{minCount})");
+                    }
+                    else
+                    {
+                        if (!staleNoiseLogged &&
+                            !string.Equals(currentResponse, baselineResponse, StringComparison.Ordinal) &&
+                            !string.IsNullOrWhiteSpace(currentResponse))
+                        {
+                            staleNoiseLogged = true;
+                            Log($"[WaitForResponse] 기준선 잡음 무시: {baselineLength}→{currentResponse.Length}자 (count={currentCount}, generating={isGenerating})");
+                        }
+                        continue;
+                    }
+                }
+
+                // 텍스트 변화 감지 및 시간 갱신
+                bool textChanged = (currentResponse != lastResponse);
+                if (textChanged)
                 {
                     lastChangeTime = DateTime.Now;
-                }
-                else
-                {
-                    // 장시간(30초) 변화가 없는 경우 타임아웃 처리
-                    if ((DateTime.Now - lastChangeTime).TotalSeconds > MaxInactiveSeconds && 
-                        string.IsNullOrEmpty(currentResponse))
+                    currentPollInterval = PollIntervalMs; // P0-3: 변화 시 빠른 폴링 복귀
+                    if (!responseStarted && !string.IsNullOrEmpty(currentResponse))
                     {
-                        Log($"오류: {MaxInactiveSeconds}초 동안 응답 변화가 없어 작업을 중단합니다.");
-                        return "응답 없음: 서버 지연 또는 가시적 답변 생성이 감지되지 않았습니다.";
+                        responseStarted = true;
                     }
+                }
+
+                // === P0-3: 동적 폴링 간격 조정 (Gemini 렌더링 간섭 감소) ===
+                double inactiveSeconds = (DateTime.Now - lastChangeTime).TotalSeconds;
+                if (!textChanged && isGenerating)
+                {
+                    if (inactiveSeconds > 5) currentPollInterval = PollVerySlowInterval;
+                    else if (inactiveSeconds > 3) currentPollInterval = PollSlowInterval;
+                }
+
+                // === P0-1: Stuck 감지 (생성 중인데 텍스트 변화 없음) ===
+                if (isGenerating && inactiveSeconds > MaxStuckSeconds)
+                {
+                    // 실질적 응답이 있으면 폐기 대신 현재까지의 응답 반환 (무한 루프 방지)
+                    if (!string.IsNullOrEmpty(currentResponse) && currentResponse.Length > 100)
+                    {
+                        Log($"[WaitForResponse] ⚠️ Stuck 감지되었으나 실질적 응답 존재({currentResponse.Length}자) - 현재 응답 반환");
+                        // 최종 확인: 혹시 막판에 추가 데이터가 들어왔을 수 있음
+                        await Task.Delay(500);
+                        var lastCheck = await GetLatestResponseAsync();
+                        if (lastCheck.Length > currentResponse.Length)
+                        {
+                            Log($"[WaitForResponse] 추가 응답 감지: {currentResponse.Length}→{lastCheck.Length}자");
+                            currentResponse = lastCheck;
+                        }
+                        return SanitizeRawResponse(currentResponse);
+                    }
+                    Log($"[WaitForResponse] 🛑 Stuck 감지 ({MaxStuckSeconds}초간 생성 중 변화 없음, 응답={currentResponse?.Length ?? 0}자)");
+                    return "응답 없음: Gemini가 응답을 생성하다 멈췄습니다.";
+                }
+
+                // 무응답 타임아웃
+                if (!responseStarted && inactiveSeconds > MaxInactiveSeconds)
+                {
+                    Log($"[WaitForResponse] 🛑 {MaxInactiveSeconds}초 무응답 타임아웃");
+                    return "응답 없음: 서버 지연 또는 가시적 답변 생성이 감지되지 않았습니다.";
                 }
 
                 // 신규 답변이 아직 노출되지 않은 초기 단계 대기
@@ -678,36 +820,33 @@ public class GeminiAutomation : IGeminiAutomation
                 {
                     OnStreamingUpdate?.Invoke("⏳ 생성 준비 중...");
                     stableCount = 0;
+                    lastResponse = currentResponse;
                     continue;
                 }
 
                 // === MORT 패턴: 생성 중 스트리밍 업데이트 ===
-                // AI가 실시간으로 답변을 작성(타이핑) 중인 경우
                 if (isGenerating)
                 {
-                    // 새 응답이 시작되었고 내용이 변경되었으면 스트리밍 전달
-                    if (currentCount > minCount && !string.IsNullOrEmpty(currentResponse) && currentResponse != lastResponse)
+                    if (currentCount > minCount && !string.IsNullOrEmpty(currentResponse) && textChanged)
                     {
                         OnStreamingUpdate?.Invoke(currentResponse);
-                        lastResponse = currentResponse;
                     }
                     stableCount = 0;
+                    lastResponse = currentResponse;
                     continue;
                 }
 
                 // 답변 작성이 완료된 것으로 추정되는 시점 (변경사항 없음 유지)
                 if (!string.IsNullOrEmpty(currentResponse))
                 {
-                    if (currentResponse == lastResponse)
+                    if (!textChanged)
                     {
                         stableCount++;
-                        
-                        // 답변의 데이터 크기에 따라 신뢰도를 높이기 위한 대기 횟수(안정화 시간) 조절
+
                         int requiredCount = GetAdaptiveStableCount(currentResponse);
-                        
+
                         if (stableCount >= requiredCount)
                         {
-                            // 최종 검증: 브라우저가 정말로 'Ready' 상태인지 최종 확인
                             await Task.Delay(50);
                             var isActuallyGenerating = await IsGeneratingAsync();
                             if (!isActuallyGenerating)
@@ -715,9 +854,17 @@ public class GeminiAutomation : IGeminiAutomation
                                 var finalCheck = await GetLatestResponseAsync();
                                 if (finalCheck == currentResponse)
                                 {
-                                    // 렌더링 지연을 대비하여 인터페이스가 마크다운 처리를 끝낼 때까지 대기
+                                    var sanitized = SanitizeRawResponse(currentResponse);
+                                    // [EC-13] 메타 텍스트(질문, 인사)만 있고 실제 데이터가 없는 경우 무효 처리
+                                    if (TranslationCleaner.IsPossibleMetaText(sanitized) && !sanitized.Contains("|"))
+                                    {
+                                        Log($"[WaitForResponse] ⚠️ 메타 텍스트만 감지됨(무효): \"{sanitized.Substring(0, Math.Min(30, sanitized.Length))}...\"");
+                                        stableCount = 0;
+                                        lastResponse = currentResponse;
+                                        continue;
+                                    }
                                     await WaitUntilReadyForNextInputAsync();
-                                    return currentResponse;
+                                    return sanitized;
                                 }
                             }
                             stableCount = 0;
@@ -726,7 +873,7 @@ public class GeminiAutomation : IGeminiAutomation
                     }
                     else
                     {
-                        stableCount = 0; // 텍스트 갱신 중인 경우 카운터 리셋
+                        stableCount = 0;
                         lastResponse = currentResponse;
                     }
                 }
@@ -734,13 +881,50 @@ public class GeminiAutomation : IGeminiAutomation
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[감시 프로세스 오류] {ex.Message}");
-                await Task.Delay(200); // 일시적인 통신 오류 시 재시도 간격 부여
+                await Task.Delay(200);
             }
         }
 
-        return string.IsNullOrEmpty(lastResponse) 
-            ? "응답 대기 시간을 초과했습니다." 
-            : lastResponse;
+        // 전체 타임아웃 시에도 "실제로 새 응답이 시작된 경우"에만 부분 응답 반환
+        if (newResponseDetected && responseStarted && !string.IsNullOrEmpty(lastResponse) && lastResponse != baselineResponse)
+        {
+            Log($"[WaitForResponse] 타임아웃이지만 응답 존재 ({lastResponse.Length}자) - 반환");
+            return SanitizeRawResponse(lastResponse);
+        }
+
+        return "응답 대기 시간을 초과했습니다.";
+    }
+
+    /// <summary>
+    /// 원시 응답 텍스트 정제 (마크다운, 줄바꿈, 특수문자 등)
+    /// </summary>
+    public static string SanitizeRawResponse(string rawResponse)
+    {
+        if (string.IsNullOrWhiteSpace(rawResponse)) return rawResponse;
+
+        var result = rawResponse;
+
+        // 1. 마크다운 코드블록 제거 (```json ... ``` 또는 ``` ... ```)
+        result = System.Text.RegularExpressions.Regex.Replace(
+            result, @"```json\s*", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        result = System.Text.RegularExpressions.Regex.Replace(
+            result, @"```\s*", "");
+
+        // 2. 마크다운 이탤릭/볼드 제거 (**text** → text, *text* → text)
+        result = System.Text.RegularExpressions.Regex.Replace(
+            result, @"\*\*([^*]+)\*\*", "$1");
+        result = System.Text.RegularExpressions.Regex.Replace(
+            result, @"\*([^*]+)\*", "$1");
+
+        // 3. JSON 문자열 내부 줄바꿈 정규화 (공백으로 대체)
+        result = System.Text.RegularExpressions.Regex.Replace(
+            result, @"(?<=[^\\])(\r?\n)(?=[^""]*""[,}\]])", " ");
+
+        // 4. 연속 공백 정리
+        result = System.Text.RegularExpressions.Regex.Replace(
+            result, @"  +", " ");
+
+        return result.Trim();
     }
 
     /// <summary>
@@ -756,10 +940,10 @@ public class GeminiAutomation : IGeminiAutomation
             try
             {
                 var ready = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.IsReadyForNextInputScript);
-                if (ready == "true") return; 
+                if (ready == "true") return;
             }
             catch { }
-            await Task.Delay(30); 
+            await Task.Delay(30);
         }
     }
 
@@ -780,7 +964,7 @@ public class GeminiAutomation : IGeminiAutomation
     public async Task<string> GetLatestResponseAsync()
     {
         var result = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.GetResponseScript);
-        
+
         // 반환된 JSON 형식의 문자열에서 실제 텍스트 내용만 정제
         if (result != null && result.StartsWith("\"") && result.EndsWith("\""))
         {
@@ -818,10 +1002,10 @@ public class GeminiAutomation : IGeminiAutomation
     // 연속적인 작업 실패를 추적하여 강도 높은 복구 전략 수행에 사용
     private int _consecutiveTimeouts = 0;
     private const int MaxConsecutiveTimeouts = 2; // 최대 허용 실패 횟수
-    
+
     // 마지막 작업 성공 시각 (통계용)
     private DateTime _lastSuccessfulResponse = DateTime.Now;
-    
+
     /// <summary>
     /// 작업 타임아웃 발생 시 호출되며, 실패 횟수에 따라 세션 초기화 또는 캐시 삭제 등의 복구 전략을 실행합니다.
     /// </summary>
@@ -829,7 +1013,7 @@ public class GeminiAutomation : IGeminiAutomation
     public async Task<RecoveryAction> HandleTimeoutAsync()
     {
         _consecutiveTimeouts++;
-        
+
         if (_consecutiveTimeouts >= MaxConsecutiveTimeouts)
         {
             // 반복 실패 시 브라우저 내부 상태 꼬임으로 간주하여 강력한 초기화 수행
@@ -869,10 +1053,10 @@ public class GeminiAutomation : IGeminiAutomation
                 Microsoft.Web.WebView2.Core.CoreWebView2BrowsingDataKinds.DiskCache |
                 Microsoft.Web.WebView2.Core.CoreWebView2BrowsingDataKinds.DownloadHistory
             );
-            
+
             // 캐시 데이터 무시 강제 새로고침 수행
             await _webView.CoreWebView2.ExecuteScriptAsync("location.reload(true);");
-            
+
             // 초기 페이지 안정화 및 입력창 로딩 대기
             await Task.Delay(2000);
             await WaitForInputReadyAsync(15);
@@ -894,7 +1078,7 @@ public class GeminiAutomation : IGeminiAutomation
         {
             var cookieManager = _webView.CoreWebView2.CookieManager;
             var cookies = await cookieManager.GetCookiesAsync("https://gemini.google.com");
-            
+
             foreach (var cookie in cookies)
             {
                 cookieManager.DeleteCookie(cookie);
@@ -917,18 +1101,18 @@ public class GeminiAutomation : IGeminiAutomation
         {
             // 진행 중인 모든 스크립트 실행 강제 중단
             await _webView.CoreWebView2.ExecuteScriptAsync("window.stop();");
-            
+
             // 빈 페이지를 통한 정적 변수 및 DOM 초기화 유도
             _webView.CoreWebView2.Navigate("about:blank");
             await Task.Delay(500);
-            
+
             // 타겟 서비스 재접속
             _webView.CoreWebView2.Navigate("https://gemini.google.com/app");
             await Task.Delay(2000);
-            
+
             // 인터페이스 가시성 대기
             await WaitForInputReadyAsync(15);
-            
+
             _consecutiveTimeouts = 0;
         }
         catch (Exception ex)
@@ -962,7 +1146,7 @@ public class GeminiAutomation : IGeminiAutomation
     public async Task<WebViewDiagnostics> DiagnoseAsync()
     {
         var diagnostics = new WebViewDiagnostics();
-        
+
         if (_webView.CoreWebView2 == null)
         {
             diagnostics.Status = WebViewStatus.NotInitialized;
@@ -972,7 +1156,7 @@ public class GeminiAutomation : IGeminiAutomation
         try
         {
             diagnostics.CurrentUrl = _webView.Source?.ToString() ?? "unknown";
-            
+
             // 1. URL이 Gemini가 아니거나 비어있으면 초기 단계로 간주
             if (string.IsNullOrEmpty(diagnostics.CurrentUrl) || diagnostics.CurrentUrl == "about:blank")
             {
@@ -997,18 +1181,18 @@ public class GeminiAutomation : IGeminiAutomation
             // 2. 상태 수집
             var inputReady = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.CheckInputReadyScript);
             diagnostics.InputReady = inputReady == "true";
-            
+
             var generating = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.IsGeneratingScript);
             diagnostics.IsGenerating = generating == "true";
-            
+
             // 로그인 만료 여부를 정밀 체크
             var loginCheck = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.DiagnoseLoginScript);
             diagnostics.IsLoggedIn = !loginCheck.Contains("logged_out");
-            
+
             // 서비스 오류 메시지 노출 여부 점검
             var errorCheck = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.DiagnoseErrorScript);
             diagnostics.ErrorMessage = errorCheck != null ? errorCheck.Trim('"') : "";
-            
+
             // 이미지 기능 사용 가능 여부 진단
             try
             {
@@ -1042,16 +1226,16 @@ public class GeminiAutomation : IGeminiAutomation
             {
                 // 이미지 진단 실패 시 기본값 유지
             }
-            
+
             // 특수 오류 처리 (문자가 포함된 경우 Error로 강제 전환)
-            if (diagnostics.ErrorMessage.Contains("문제가 발생") || 
+            if (diagnostics.ErrorMessage.Contains("문제가 발생") ||
                 diagnostics.ErrorMessage.Contains("Something went wrong") ||
                 diagnostics.ErrorMessage.Contains("다시 시도"))
             {
                 diagnostics.Status = WebViewStatus.Error;
                 return diagnostics;
             }
-            
+
             // 3. 우선순위에 따른 상태 결정
             if (!diagnostics.IsLoggedIn)
                 diagnostics.Status = WebViewStatus.LoginNeeded;
@@ -1069,14 +1253,116 @@ public class GeminiAutomation : IGeminiAutomation
             diagnostics.Status = WebViewStatus.Error;
             diagnostics.ErrorMessage = ex.Message;
         }
-        
+
         return diagnostics;
+    }
+
+    /// <summary>
+    /// 페이지 상태 진단 결과
+    /// </summary>
+    public class PageState
+    {
+        public bool InputReady { get; set; }
+        public bool IsGenerating { get; set; }
+        public bool HasError { get; set; }
+        public bool LoginNeeded { get; set; }
+
+        /// <summary>
+        /// 번역 요청이 가능한 상태인지 (입력창 준비됨 + 생성 중 아님 + 에러 없음)
+        /// </summary>
+        public bool CanTranslate => InputReady && !IsGenerating && !HasError && !LoginNeeded;
+    }
+
+    /// <summary>
+    /// 페이지 상태를 종합적으로 진단합니다.
+    /// </summary>
+    public async Task<PageState> DiagnosePageStateAsync()
+    {
+        var state = new PageState();
+
+        if (_webView?.CoreWebView2 == null) return state;
+
+        try
+        {
+            var result = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.DiagnosePageStateScript);
+            if (!string.IsNullOrEmpty(result) && result != "null")
+            {
+                // JSON 파싱 (간단한 문자열 처리 - Newtonsoft 의존성 방지)
+                var json = result.Trim('"').Replace("\\\"", "\"");
+                state.InputReady = json.Contains("\"inputReady\":true");
+                state.IsGenerating = json.Contains("\"isGenerating\":true");
+                state.HasError = json.Contains("\"hasError\":true");
+                state.LoginNeeded = json.Contains("\"loginNeeded\":true");
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[GeminiAutomation] 상태 진단 오류: {ex.Message}");
+        }
+
+        return state;
+    }
+
+    /// <summary>
+    /// 로그인 프롬프트나 배너가 떠 있는 경우 이를 감지하고 자동으로 닫기를 시도합니다.
+    /// </summary>
+    public async Task<bool> CheckAndDismissLoginPromptsAsync()
+    {
+        if (_webView?.CoreWebView2 == null) return false;
+
+        try
+        {
+            var check = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.DetectAllLoginPromptsScript);
+            if (check != null && check.Contains("\"hasAnyPrompt\":true"))
+            {
+                Log("[Login] 로그인 프롬프트 감지 - 자동 해제 시도");
+                var dismiss = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.DismissAllLoginPromptsScript);
+                Log($"[Login] 해제 결과: {dismiss}");
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"[Login] 프롬프트 체크 오류: {ex.Message}");
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// WebView가 about:blank에 머물거나 URL이 이상한 경우 강제로 복구합니다.
+    /// </summary>
+    private async Task EnsureGeminiNavigationAsync()
+    {
+        // 2초 간격으로 최대 15회 모니터링
+        for (int i = 0; i < 15; i++)
+        {
+            await Task.Delay(2000);
+
+            if (_webView?.CoreWebView2 != null)
+            {
+                try
+                {
+                    string currentUrl = _webView.Source?.ToString() ?? "";
+                    if (string.IsNullOrEmpty(currentUrl) || currentUrl == "about:blank" || !currentUrl.Contains("gemini.google.com"))
+                    {
+                        Log($"[Navigation] URL 이상 감지 ({currentUrl}) - 강제 Navigate 시도");
+                        _webView.CoreWebView2.Navigate("https://gemini.google.com/app");
+                    }
+                    else
+                    {
+                        // 정상 페이지면 종료
+                        break;
+                    }
+                }
+                catch { }
+            }
+        }
     }
 
     public async Task<bool> RecoverAsync()
     {
         if (_webView.CoreWebView2 == null) return false;
-        
+
         try
         {
             Log("오류 복구 시도 중 (JavaScript 대응책 실행)...");
@@ -1097,24 +1383,24 @@ public class GeminiAutomation : IGeminiAutomation
     public async Task<bool> AutoRecoverAsync()
     {
         var diagnostics = await DiagnoseAsync();
-        
+
         switch (diagnostics.Status)
         {
             case WebViewStatus.Ready:
-                return true; 
-                
+                return true;
+
             case WebViewStatus.Generating:
                 // 무한 생성 루프 탈출을 위한 강제 중단
                 await ForceStopGenerationAsync();
                 await Task.Delay(1000);
                 return await WaitForInputReadyAsync(5);
-                
+
             case WebViewStatus.Error:
             case WebViewStatus.LoginNeeded:
                 // 엔진 오동작 대응 (하드 클리닝)
                 await ClearCacheAndRefreshAsync();
                 return await WaitForInputReadyAsync(10);
-                
+
             case WebViewStatus.NotInitialized:
             default:
                 // 엔진 불능 상태 대응 (전체 재부팅)
@@ -1150,11 +1436,11 @@ public class GeminiAutomation : IGeminiAutomation
     public async Task<bool> StopGeminiResponseAsync()
     {
         if (_webView?.CoreWebView2 == null) return false;
-        
+
         try
         {
             Log("Gemini 응답 강제 중지 (페이지 새로고침)...");
-            
+
             // 1. 먼저 중지 버튼 시도
             var result = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.StopGeminiResponseScript);
             if (result != "\"no_stop_button_found\"")
@@ -1162,14 +1448,14 @@ public class GeminiAutomation : IGeminiAutomation
                 Log("중지 버튼으로 중지됨");
                 return true;
             }
-            
+
             // 2. 중지 버튼이 없으면 페이지 새로고침으로 강제 중단
             Log("중지 버튼 없음, 페이지 새로고침으로 강제 중단...");
             _webView.CoreWebView2.Navigate("https://gemini.google.com/app");
-            
+
             // 페이지 로드 대기
             await Task.Delay(2000);
-            
+
             Log("페이지 새로고침 완료");
             return true;
         }
@@ -1186,19 +1472,19 @@ public class GeminiAutomation : IGeminiAutomation
     public async Task<(string Response, bool WasRecovered)> GenerateContentWithRecoveryAsync(string prompt)
     {
         bool wasRecovered = false;
-        
+
         for (int attempt = 0; attempt < 3; attempt++)
         {
             try
             {
                 var response = await GenerateContentAsync(prompt);
-                
+
                 if (!string.IsNullOrEmpty(response) && !response.Contains("시간 초과"))
                 {
                     RecordSuccess();
                     return (response, wasRecovered);
                 }
-                
+
                 wasRecovered = true;
                 await HandleTimeoutAsync();
             }
@@ -1209,7 +1495,7 @@ public class GeminiAutomation : IGeminiAutomation
                 await AutoRecoverAsync();
             }
         }
-        
+
         return ("번역을 완료하지 못했습니다. 서비스 상태를 확인한 후 다시 시도해 주세요.", wasRecovered);
     }
 
@@ -1239,9 +1525,9 @@ public class GeminiAutomation : IGeminiAutomation
                     return 'tools_opened';
                 })()
             ");
-            
+
             await Task.Delay(500);
-            
+
             // 이미지 생성하기 선택
             var genResult = await _webView.CoreWebView2.ExecuteScriptAsync(@"
                 (function() {
@@ -1255,12 +1541,12 @@ public class GeminiAutomation : IGeminiAutomation
                     return 'no_image_gen';
                 })()
             ");
-            
+
             await Task.Delay(500);
-            
+
             // 메뉴 닫기 (ESC)
             await _webView.CoreWebView2.ExecuteScriptAsync("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}));");
-            
+
             Log(genResult.Contains("image_gen_enabled") ? "이미지 생성 모드 활성화됨" : "이미지 생성 활성화 실패");
             return genResult.Contains("image_gen_enabled");
         }
@@ -1278,7 +1564,7 @@ public class GeminiAutomation : IGeminiAutomation
     private async Task<bool> UploadViaCdpAsync(string absoluteFilePath)
     {
         if (_webView.CoreWebView2 == null) return false;
-        
+
         try
         {
             // Step 1: 먼저 기존의 file input 확인 (이미 DOM에 있을 수 있음)
@@ -1299,10 +1585,10 @@ public class GeminiAutomation : IGeminiAutomation
                     }
                     return { found: false };
                 })()";
-            
+
             var existingResult = await _webView.CoreWebView2.ExecuteScriptAsync(existingInputScript);
             Log($"CDP: 기존 file input 확인 = {existingResult}");
-            
+
             // Step 2: 기존 input이 없으면 메뉴를 열어 file input 생성 유도
             // 주의: 서브메뉴 항목 클릭 시 네이티브 다이얼로그가 열리므로 메인 버튼만 클릭
             if (existingResult.Contains("\"found\":false"))
@@ -1343,15 +1629,15 @@ public class GeminiAutomation : IGeminiAutomation
                         }
                         return 'no_menu';
                     })()";
-                
+
                 await _webView.CoreWebView2.ExecuteScriptAsync(menuScript);
                 await Task.Delay(500);
-                
+
                 // 다시 file input 확인
                 existingResult = await _webView.CoreWebView2.ExecuteScriptAsync(existingInputScript);
                 Log($"CDP: 메뉴 클릭 후 file input 확인 = {existingResult}");
             }
-            
+
             // Step 3: file input 요소의 backendNodeId 획득 (name="Filedata" 우선순위)
             var getNodeScript = @"
                 (function() {
@@ -1370,26 +1656,26 @@ public class GeminiAutomation : IGeminiAutomation
                     }
                     return null;
                 })()";
-            
+
             var inputIdResult = await _webView.CoreWebView2.ExecuteScriptAsync(getNodeScript);
             var inputId = inputIdResult?.Trim('"');
-            
+
             if (string.IsNullOrEmpty(inputId) || inputId == "null")
             {
                 Log("CDP: file input 요소를 찾을 수 없음");
                 return false;
             }
-            
+
             Log($"CDP: file input ID = {inputId}");
-            
+
             // Step 3: CDP로 DOM 문서 가져오기
             await _webView.CoreWebView2.CallDevToolsProtocolMethodAsync("DOM.enable", "{}");
             var docResult = await _webView.CoreWebView2.CallDevToolsProtocolMethodAsync("DOM.getDocument", "{}");
-            
+
             // Step 4: querySelector로 노드 찾기
             var querySelectorParams = $@"{{""nodeId"": 1, ""selector"": ""#{inputId}""}}";
             var queryResult = await _webView.CoreWebView2.CallDevToolsProtocolMethodAsync("DOM.querySelector", querySelectorParams);
-            
+
             // queryResult를 파싱하여 nodeId 추출
             // JSON 형식: {"nodeId": 123}
             var nodeIdMatch = System.Text.RegularExpressions.Regex.Match(queryResult, @"""nodeId""\s*:\s*(\d+)");
@@ -1398,18 +1684,18 @@ public class GeminiAutomation : IGeminiAutomation
                 Log($"CDP: nodeId를 찾을 수 없음. 결과: {queryResult}");
                 return false;
             }
-            
+
             var nodeId = nodeIdMatch.Groups[1].Value;
             Log($"CDP: nodeId = {nodeId}");
-            
+
             // Step 5: DOM.setFileInputFiles로 파일 설정
             // 경로의 백슬래시를 이스케이프 처리
             var escapedPath = absoluteFilePath.Replace("\\", "\\\\");
             var setFilesParams = $@"{{""nodeId"": {nodeId}, ""files"": [""{escapedPath}""]}}";
-            
+
             await _webView.CoreWebView2.CallDevToolsProtocolMethodAsync("DOM.setFileInputFiles", setFilesParams);
             Log("CDP: 파일 설정 완료");
-            
+
             // Step 6: 업로드 확인 대기
             await Task.Delay(500);
             var checkScript = @"
@@ -1417,10 +1703,10 @@ public class GeminiAutomation : IGeminiAutomation
                     const hasUpload = document.querySelector('img[src*=""blob:""], .attachment-thumbnail, content-container img, .upload-progress');
                     return hasUpload ? 'uploaded' : 'pending';
                 })()";
-            
+
             var checkResult = await _webView.CoreWebView2.ExecuteScriptAsync(checkScript);
             Log($"CDP: 업로드 확인 결과 = {checkResult}");
-            
+
             return true;
         }
         catch (Exception ex)
@@ -1444,7 +1730,7 @@ public class GeminiAutomation : IGeminiAutomation
         // 절대 경로 변환 (CDP는 절대 경로 필요)
         string absolutePath = Path.GetFullPath(imagePath);
         Log($"이미지 업로드 시작: {Path.GetFileName(imagePath)}");
-        
+
         try
         {
             // ========================================
@@ -1457,7 +1743,7 @@ public class GeminiAutomation : IGeminiAutomation
                 return true;
             }
             Log("CDP 방식 실패, 다른 방법 시도...");
-            
+
             // 이미지를 Base64로 읽기 (다른 방법들에서 사용)
             byte[] imageBytes = await File.ReadAllBytesAsync(imagePath);
             string base64Image = Convert.ToBase64String(imageBytes);
@@ -1544,7 +1830,7 @@ public class GeminiAutomation : IGeminiAutomation
 
             // 방법 3: 파일 input 직접 주입 (폴백)
             Log("폴백: 파일 input 직접 주입 방식 시도...");
-            
+
             // 먼저 업로드 메뉴를 열어 파일 input을 DOM에 생성 (동기 방식)
             var menuClickScript = @"
                 (function() {
@@ -1566,10 +1852,10 @@ public class GeminiAutomation : IGeminiAutomation
                     }
                     return 'no_main_btn';
                 })()";
-            
+
             await _webView.CoreWebView2.ExecuteScriptAsync(menuClickScript);
             await Task.Delay(600);
-            
+
             // 서브메뉴 클릭
             var subMenuScript = @"
                 (function() {
@@ -1587,7 +1873,7 @@ public class GeminiAutomation : IGeminiAutomation
                     }
                     return 'no_submenu';
                 })()";
-            
+
             await _webView.CoreWebView2.ExecuteScriptAsync(subMenuScript);
             await Task.Delay(500);
 
@@ -1690,10 +1976,10 @@ public class GeminiAutomation : IGeminiAutomation
                         return 'drop_error: ' + e.message;
                     }}
                 }})()";
-            
+
             var dropResult = await _webView.CoreWebView2.ExecuteScriptAsync(dropScript);
             Log($"Drop 결과: {dropResult}");
-            
+
             if (dropResult.Contains("drop_dispatched"))
             {
                 await Task.Delay(1000);
@@ -1703,7 +1989,7 @@ public class GeminiAutomation : IGeminiAutomation
                     return true;
                 }
             }
-            
+
             Log("모든 업로드 방법 실패");
             return false;
         }
@@ -1713,14 +1999,14 @@ public class GeminiAutomation : IGeminiAutomation
             return false;
         }
     }
-    
+
     /// <summary>
     /// 업로드 성공 여부를 확인하는 헬퍼 메서드
     /// </summary>
     private async Task<bool> CheckUploadSuccessAsync()
     {
         if (_webView.CoreWebView2 == null) return false;
-        
+
         var checkScript = @"
             (function() {
                 const selectors = [
@@ -1748,7 +2034,7 @@ public class GeminiAutomation : IGeminiAutomation
                 }
                 return 'not_found';
             })()";
-        
+
         var result = await _webView.CoreWebView2.ExecuteScriptAsync(checkScript);
         return result != null && result.Contains("found:");
     }
@@ -1758,10 +2044,10 @@ public class GeminiAutomation : IGeminiAutomation
     /// </summary>
     public async Task<string> SendWatermarkRemovalPromptAsync(string customPrompt = "")
     {
-        var prompt = string.IsNullOrEmpty(customPrompt) 
+        var prompt = string.IsNullOrEmpty(customPrompt)
             ? Services.PromptService.BuildNanoBananaPrompt("")
             : customPrompt;
-            
+
         Log($"전용 프롬프트 전송 ({prompt.Length}자)");
         return await GenerateContentAsync(prompt);
     }
@@ -1835,7 +2121,7 @@ public class GeminiAutomation : IGeminiAutomation
                 })()";
 
             var downloadResult = await _webView.CoreWebView2.ExecuteScriptAsync(script);
-            
+
             bool success = downloadResult.Contains("download_started");
             Log(success ? "성공: 다운로드 명령을 전달했습니다." : "실패: 다운로드 버튼을 찾을 수 없습니다.");
             return success;
@@ -1854,32 +2140,32 @@ public class GeminiAutomation : IGeminiAutomation
     public async Task<bool> ProcessImageAsync(string imagePath, string? outputPath = null)
     {
         Log($"특수 이미지 처리 워크플로우 시작: {Path.GetFileName(imagePath)}");
-        
+
         // 1. 고급 모델(Pro) 및 관련 기능 활성화
         await SelectProModeAsync();
         await EnableImageGenerationAsync();
-        
+
         // 2. 깨끗한 컨텍스트를 위해 세션 초기화
         await StartNewChatAsync();
-        
+
         // 3. 대상 이미지 업로드 및 프롬프트 전송
         if (!await UploadImageAsync(imagePath))
         {
             Log("이미지 데이터 전송에 실패했습니다.");
             return false;
         }
-        
+
         // 4. 전용 프롬프트 전송 (예: 워터마크 제거 등)
         await SendWatermarkRemovalPromptAsync();
-        
+
         // 5. 생성된 결과물 저장
         var downloadPath = outputPath ?? Path.Combine(
             Path.GetDirectoryName(imagePath) ?? "",
             "processed_" + Path.GetFileName(imagePath)
         );
-        
+
         await DownloadResultImageAsync(downloadPath);
-        
+
         Log($"워크플로우 완료: {Path.GetFileName(imagePath)}");
         return true;
     }
@@ -1887,22 +2173,22 @@ public class GeminiAutomation : IGeminiAutomation
     #endregion
 
     #region IGeminiAutomation 인터페이스 표준 구현부
-    
+
     /// <summary> Gemini 공식 앱 서비스로 이동합니다. </summary>
     public async Task<bool> NavigateToGeminiAsync()
     {
         if (_webView.CoreWebView2 == null) return false;
-        
+
         _webView.CoreWebView2.Navigate("https://gemini.google.com/app");
         await Task.Delay(1500);
         return await WaitForInputReadyAsync(15);
     }
-    
+
     /// <summary> 시스템이 명령 수락 가능한 상태인지 점검합니다. </summary>
     public async Task<bool> IsReadyAsync()
     {
         if (_webView.CoreWebView2 == null) return false;
-        
+
         try
         {
             var result = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.CheckInputReadyScript);
@@ -1910,7 +2196,7 @@ public class GeminiAutomation : IGeminiAutomation
         }
         catch { return false; }
     }
-    
+
     /// <summary> 명시적으로 메시지를 전송합니다. </summary>
     async Task<bool> IGeminiAutomation.SendMessageAsync(string message, bool preserveAttachment)
     {
@@ -1921,12 +2207,12 @@ public class GeminiAutomation : IGeminiAutomation
         }
         catch { return false; }
     }
-    
+
     /// <summary> 브라우저 내 파일 선택 다이얼로그를 트리거합니다. </summary>
     public async Task<bool> OpenUploadMenuAsync()
     {
         if (_webView.CoreWebView2 == null) return false;
-        
+
         Log("파일 업로드 레이어를 호출합니다.");
         try
         {
@@ -1948,15 +2234,15 @@ public class GeminiAutomation : IGeminiAutomation
                     return 'fail';
                 })()
             ");
-            
+
             if (!step1Result.Contains("ok"))
             {
                 Log("메인 업로드 버튼을 찾을 수 없습니다.");
                 return false;
             }
-            
+
             await Task.Delay(500);
-            
+
             // Step 2: Click file upload menu item
             var step2Result = await _webView.CoreWebView2.ExecuteScriptAsync(@"
                 (function() {
@@ -1975,7 +2261,7 @@ public class GeminiAutomation : IGeminiAutomation
                     return 'fail';
                 })()
             ");
-            
+
             Log($"업로드 메뉴 결과: step1={step1Result}, step2={step2Result}");
             return step2Result.Contains("ok");
         }
@@ -1985,15 +2271,15 @@ public class GeminiAutomation : IGeminiAutomation
             return false;
         }
     }
-    
+
     /// <summary> 파일이 서버 및 클라이언트 측에 로드 완료될 때까지 대기합니다. </summary>
     public async Task<bool> WaitForImageUploadAsync(int timeoutSeconds = 60)
     {
         if (_webView.CoreWebView2 == null) return false;
-        
+
         Log("업로드 완료 상태를 모니터링 중입니다.");
         var startTime = DateTime.Now;
-        
+
         while ((DateTime.Now - startTime).TotalSeconds < timeoutSeconds)
         {
             try
@@ -2040,7 +2326,7 @@ public class GeminiAutomation : IGeminiAutomation
                         return 'not_found';
                     })()
                 ");
-                
+
                 if (result != null && result.Contains("found:"))
                 {
                     Log($"업로드 확인됨: {result.Trim('\"')}");
@@ -2048,14 +2334,14 @@ public class GeminiAutomation : IGeminiAutomation
                 }
             }
             catch { }
-            
+
             await Task.Delay(500);
         }
-        
+
         Log("업로드 대기 시간 초과");
         return false;
     }
-    
+
     /// <summary> 고급 AI 모델(Pro) 모드로 환경을 구성합니다. 최대 3회 재시도. </summary>
     public async Task<bool> SelectProModeAsync()
     {
@@ -2068,7 +2354,7 @@ public class GeminiAutomation : IGeminiAutomation
                 Log("이미 Pro 모드입니다.");
                 return true;
             }
-            
+
             // Pro 모드 전환 시도
             var switched = await SelectModelAsync("pro");
             if (switched)
@@ -2082,20 +2368,20 @@ public class GeminiAutomation : IGeminiAutomation
                     return true;
                 }
             }
-            
+
             Log($"Pro 모드 전환 재시도 ({attempt + 1}/3)...");
             await Task.Delay(1000);
         }
-        
+
         Log("Pro 모드 전환 실패.");
         return false;
     }
-    
+
     /// <summary> 현재 선택된 모델 타입을 간단히 확인합니다 (flash/pro/unknown). </summary>
     public async Task<string> GetCurrentModelTypeAsync()
     {
         if (_webView.CoreWebView2 == null) return "unknown";
-        
+
         try
         {
             var result = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.GetCurrentModelTypeScript);
@@ -2111,7 +2397,7 @@ public class GeminiAutomation : IGeminiAutomation
     public async Task<bool> SelectModelAsync(string modelName)
     {
         if (_webView.CoreWebView2 == null) return false;
-        
+
         Log($"AI 모델을 [{modelName}] 계열로 전환합니다.");
         try
         {
@@ -2129,16 +2415,15 @@ public class GeminiAutomation : IGeminiAutomation
     /// <summary> 답변 작성 완료 시까지 대기합니다. (인터페이스 규격) </summary>
     async Task<string> IGeminiAutomation.WaitForResponseAsync(int timeoutSeconds)
     {
-        // 내부 정밀 대기 로직 사용 (minCount 0으로 호출하여 응답 감지 수행)
-        return await WaitForResponseAsync(0);
+        return await WaitForResponseAsync(timeoutSeconds);
     }
-    
+
     /// <summary> 결과 생성 시 이미지를 자동으로 내려받습니다. </summary>
     async Task<bool> IGeminiAutomation.DownloadResultImageAsync()
     {
         return await DownloadResultImageAsync("");
     }
-    
+
     #endregion
 }
 

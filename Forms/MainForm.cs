@@ -10,6 +10,7 @@ using Microsoft.Web.WebView2.Core;
 using Newtonsoft.Json.Linq;
 
 using System.Linq;
+using System.Text;
 using GeminiWebTranslator.Services;
 
 namespace GeminiWebTranslator.Forms;
@@ -74,7 +75,20 @@ public partial class MainForm : Form
     #region 상태 변수
     private readonly string profileDir;   // 브라우저 프로필 저장 위치
     private readonly string cookiePath;   // 쿠키 설정 저장 위치
-    private bool useWebView2Mode = false; // 현재 WebView2 모드 활성화 여부
+    private GeminiWebTranslator.Models.TranslationMode _activeMode = Models.TranslationMode.None; // 현재 활성화된 모드
+
+    public GeminiWebTranslator.Models.TranslationMode ActiveMode
+    {
+        get => _activeMode;
+        set
+        {
+            if (_activeMode != value)
+            {
+                _activeMode = value;
+                UpdateModeUI();
+            }
+        }
+    }
     private readonly Dictionary<string, CoreWebView2Environment> _webViewEnvironments = new(); // 프로필별 환경 저장
     #endregion
 
@@ -83,6 +97,7 @@ public partial class MainForm : Form
     private bool isFileMode = false;
     private JToken? loadedJsonData;
     private List<string>? loadedTsvLines;
+    private string? loadedTsvSourcePath; // 실제 TSV 번역 입력 경로 (_ko.tsv 직접 로드시 원본 .tsv)
 
     // 번역 중지/재개 상태 제어
     private CancellationTokenSource? translationCancellation;
@@ -126,7 +141,7 @@ public partial class MainForm : Form
         return async (prompt) =>
         {
             // 1. WebView 모드 우선
-            if (useWebView2Mode)
+            if (ActiveMode == Models.TranslationMode.WebView)
             {
                 if (automation == null) throw new Exception("WebView2가 초기화되지 않았습니다.");
 
@@ -144,14 +159,42 @@ public partial class MainForm : Form
             }
 
             // 2. HTTP 모드
-            if (chkHttpMode.Checked && httpClient?.IsInitialized == true)
+            if (ActiveMode == Models.TranslationMode.Http && httpClient?.IsInitialized == true)
             {
                 httpClient.ResetSession();
                 return await httpClient.GenerateContentAsync(prompt);
             }
 
-            throw new Exception("번역 모드가 선택되지 않았습니다.\n\n다음 중 하나를 활성화해주세요:\n• HTTP 체크박스 + HTTP 설정 버튼\n• WebView 로그인 버튼");
+            throw new Exception("번역 모드가 선택되지 않았습니다.\n\n다음 중 하나를 활성화해주세요:\n• HTTP 체크박스 활성화\n• WebView 로그인 혹은 모드 버튼 클릭");
         };
+    }
+
+    /// <summary>
+    /// 현재 활성화된 모드에 따라 UI 컨트롤의 상태를 업데이트합니다.
+    /// </summary>
+    private void UpdateModeUI()
+    {
+        if (this.InvokeRequired)
+        {
+            this.Invoke(new Action(UpdateModeUI));
+            return;
+        }
+
+        // 체크박스 처리
+        if (chkHttpMode != null)
+        {
+            chkHttpMode.Checked = (_activeMode == Models.TranslationMode.Http);
+        }
+
+        // 버튼 강조 처리
+        Button? activeButton = _activeMode switch
+        {
+            Models.TranslationMode.Http => btnModeHttp,
+            Models.TranslationMode.WebView => btnModeWebView,
+            _ => null
+        };
+
+        UpdateModeButtonsUI(activeButton);
     }
 
     public MainForm()
@@ -396,6 +439,30 @@ public partial class MainForm : Form
     /// </summary>
     public Form? ShowBrowserTab()
     {
+        if (_activeWebViewBrowserForm != null && !_activeWebViewBrowserForm.IsDisposed)
+        {
+            if (_activeWebViewBrowserForm.WindowState == FormWindowState.Minimized)
+            {
+                _activeWebViewBrowserForm.WindowState = FormWindowState.Normal;
+            }
+            if (_activeWebViewBrowserForm.Opacity < 1.0)
+            {
+                _activeWebViewBrowserForm.Opacity = 1.0;
+            }
+            if (_activeWebViewBrowserForm.Location.X < -1500)
+            {
+                var workingArea = Screen.FromControl(this).WorkingArea;
+                _activeWebViewBrowserForm.Location = new Point(
+                    workingArea.Left + (workingArea.Width - _activeWebViewBrowserForm.Width) / 2,
+                    workingArea.Top + (workingArea.Height - _activeWebViewBrowserForm.Height) / 2
+                );
+            }
+            _activeWebViewBrowserForm.BringToFront();
+            _activeWebViewBrowserForm.Activate();
+            AppendLog("[WebView] 기존 브라우저 창을 재사용합니다.");
+            return _activeWebViewBrowserForm;
+        }
+
         // WebView가 초기화되지 않았으면 먼저 초기화
         if (webView?.CoreWebView2 == null)
         {
@@ -410,6 +477,7 @@ public partial class MainForm : Form
             StartPosition = FormStartPosition.CenterScreen,
             BackColor = Color.FromArgb(20, 20, 22)
         };
+        _activeWebViewBrowserForm = browserForm;
 
         // WebView를 임시로 이동
         if (webView != null)
@@ -425,6 +493,50 @@ public partial class MainForm : Form
         var btnRefresh = new Button { Text = "새로고침", Width = 90, Height = 35, Location = new Point(110, 5), BackColor = Color.FromArgb(60, 60, 70), ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand };
         var btnClose = new Button { Text = "닫기", Width = 80, Height = 35, Location = new Point(210, 5), BackColor = Color.FromArgb(180, 70, 70), ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand };
 
+        // 브라우저 쓰로틀링 방지 (최소화 가로채기) 로직
+        Point? lastNormalLocation = null;
+        bool isVirtualMinimized = false;
+        browserForm.SizeChanged += (s, e) =>
+        {
+            if (browserForm.WindowState == FormWindowState.Minimized)
+            {
+                // 쓰로틀링 방지: 실제로 최소화하는 대신 화면 밖으로 이동하고 Normal 상태 유지
+                if (browserForm.Location.X >= -1000) lastNormalLocation = browserForm.Location;
+                browserForm.WindowState = FormWindowState.Normal;
+                browserForm.Location = new Point(-3000, -3000);
+                browserForm.Opacity = 0.01;
+                if (!isVirtualMinimized)
+                {
+                    isVirtualMinimized = true;
+                    AppendLog("[WebView] 창이 가상 최소화 모드로 전환되었습니다. (쓰로틀링 방지)");
+                }
+            }
+            else if (browserForm.WindowState == FormWindowState.Normal && browserForm.Location.X < -1500)
+            {
+                // 복구: 사용자가 작업 표시줄 등에서 다시 선택했을 때
+                browserForm.Opacity = 1.0;
+                if (lastNormalLocation != null)
+                {
+                    browserForm.Location = lastNormalLocation.Value;
+                    lastNormalLocation = null;
+                }
+                else
+                {
+                    // 수동 중앙 정렬
+                    var workingArea = Screen.FromControl(browserForm).WorkingArea;
+                    browserForm.Location = new Point(
+                        workingArea.Left + (workingArea.Width - browserForm.Width) / 2,
+                        workingArea.Top + (workingArea.Height - browserForm.Height) / 2
+                    );
+                }
+                if (isVirtualMinimized)
+                {
+                    isVirtualMinimized = false;
+                    AppendLog("[WebView] 가상 최소화 모드에서 복구되었습니다.");
+                }
+            }
+        };
+
         btnNewChat.Click += async (s, e) => { if (automation != null) await automation.StartNewChatAsync(); };
         btnRefresh.Click += (s, e) => { webView?.CoreWebView2?.Reload(); };
         btnClose.Click += (s, e) => { browserForm.Close(); };
@@ -435,6 +547,7 @@ public partial class MainForm : Form
         // 폼 닫힐 때 WebView를 MainForm으로 돌려놓기
         browserForm.FormClosing += (s, e) =>
         {
+            _activeWebViewBrowserForm = null;
             if (webView != null)
             {
                 // 스텔스 모드 복구: Visible 유지, 크기 1x1, 뒤로 숨기기
@@ -684,7 +797,7 @@ public partial class MainForm : Form
                             imageProcessor.OnLog += msg => AppendLog(msg);
                         }
 
-                        useWebView2Mode = true;
+                        ActiveMode = Models.TranslationMode.WebView;
                         btnTranslate.Enabled = true;
                     }
                 };
@@ -822,7 +935,7 @@ public partial class MainForm : Form
         }
 
         // 3. 상태 초기화
-        useWebView2Mode = false;
+        ActiveMode = Models.TranslationMode.Http;
         UpdateStatus("🔄 WebView 서비스 재시작됨 - 모드 재선택 필요", UiTheme.ColorWarning);
         UpdateModeButtonsUI(null); // 모든 강조 해제
 
@@ -901,7 +1014,7 @@ public partial class MainForm : Form
     /// </summary>
     private void ShowHttpSettingsForm()
     {
-        useWebView2Mode = false;
+        ActiveMode = Models.TranslationMode.Http;
         UpdateModeButtonsUI(btnModeHttp);
         if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
 
@@ -945,6 +1058,7 @@ public partial class MainForm : Form
     /// [WebView 모드] 버튼 클릭 시 호출 - WebView 설정 창을 엽니다.
     /// </summary>
     private Forms.WebViewSettingsForm? _webViewSettingsForm;
+    private Form? _activeWebViewBrowserForm;
 
     private async void BtnModeWebView_Click(object? sender, EventArgs e)
     {
@@ -962,7 +1076,7 @@ public partial class MainForm : Form
             _webViewSettingsForm.OnLog += msg => AppendLog(msg);
             _webViewSettingsForm.OnModeChanged += (useLoginMode, useGuestHttp) =>
             {
-                useWebView2Mode = true;
+                ActiveMode = Models.TranslationMode.WebView;
                 UpdateModeButtonsUI(btnModeWebView);
                 if (btnNanoBanana != null) btnNanoBanana.Enabled = true;
 
@@ -1033,7 +1147,7 @@ public partial class MainForm : Form
         var style = cmbStyle.SelectedItem?.ToString() ?? "자연스럽게";
 
         // 현재 설정으로 프롬프트 생성
-        var prompt = translationContext.BuildContextualPrompt(text, targetLang, style, useVisualHistory: useWebView2Mode);
+        var prompt = translationContext.BuildContextualPrompt(text, targetLang, style, useVisualHistory: ActiveMode == Models.TranslationMode.WebView);
 
         // 결과 미리보기용 다이얼로그 생성
         using (var pf = new Form())
@@ -1065,7 +1179,10 @@ public partial class MainForm : Form
     /// </summary>
     private void BtnSettings_Click(object? sender, EventArgs e)
     {
-        using (var settingsForm = new GeminiWebTranslator.Forms.TranslationSettingsFormEx(currentSettings))
+        using (var settingsForm = new GeminiWebTranslator.Forms.TranslationSettingsFormEx(
+            currentSettings,
+            CustomTranslationPrompt,
+            !string.IsNullOrWhiteSpace(CustomTranslationPrompt)))
         {
             if (settingsForm.ShowDialog() == DialogResult.OK)
             {
@@ -1109,11 +1226,44 @@ public partial class MainForm : Form
                     {
                         loadedJsonData = Newtonsoft.Json.Linq.JToken.Parse(settingsForm.LoadedFileContent);
                         loadedTsvLines = null;
+                        loadedTsvSourcePath = null;
                         txtInput.Text = $"[파일 모드] JSON ({Path.GetFileName(loadedFilePath)})\n'번역하기' 클릭";
                     }
                     else if (ext == ".tsv")
                     {
-                        loadedTsvLines = settingsForm.LoadedFileContent.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None).ToList();
+                        string tsvContent = settingsForm.LoadedFileContent;
+                        loadedTsvSourcePath = loadedFilePath;
+
+                        // [RESUME IMPROVEMENT] _ko 파일 직접 열기 대응: 원본 파일이 있으면 원본을 베이스로 로드
+                        if (loadedFilePath.EndsWith("_ko.tsv", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var originalPath = loadedFilePath.Replace("_ko.tsv", ".tsv", StringComparison.OrdinalIgnoreCase);
+                            if (File.Exists(originalPath))
+                            {
+                                try
+                                {
+                                    AppendLog($"[TSV] _ko 파일 감지 -> 원본({Path.GetFileName(originalPath)})에서 전체 구조를 로드하여 대조합니다.");
+                                    loadedTsvLines = File.ReadAllLines(originalPath, Encoding.UTF8).ToList();
+                                    loadedTsvSourcePath = originalPath;
+                                }
+                                catch (Exception ex)
+                                {
+                                    AppendLog($"[WARN] 원본 파일 로드 실패: {ex.Message}. 현재 파일만 사용합니다.");
+                                    loadedTsvLines = tsvContent.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None).ToList();
+                                    loadedTsvSourcePath = loadedFilePath;
+                                }
+                            }
+                            else
+                            {
+                                loadedTsvLines = tsvContent.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None).ToList();
+                                loadedTsvSourcePath = loadedFilePath;
+                            }
+                        }
+                        else
+                        {
+                            loadedTsvLines = tsvContent.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None).ToList();
+                        }
+
                         if (loadedTsvLines.Count > 0 && string.IsNullOrEmpty(loadedTsvLines.Last()))
                             loadedTsvLines.RemoveAt(loadedTsvLines.Count - 1);
 
@@ -1125,6 +1275,7 @@ public partial class MainForm : Form
                         // 일반 텍스트 파일
                         txtInput.Text = settingsForm.LoadedFileContent;
                         isFileMode = false;
+                        loadedTsvSourcePath = null;
                         txtInput.ReadOnly = false;
                     }
 
@@ -1133,12 +1284,13 @@ public partial class MainForm : Form
                 else
                 {
                     // 파일 닫힘 처리
-                    if (isFileMode)
+                    if (ActiveMode == Models.TranslationMode.WebView)
                     {
                         isFileMode = false;
                         loadedFilePath = null;
                         loadedJsonData = null;
                         loadedTsvLines = null;
+                        loadedTsvSourcePath = null;
 
                         // 상태 초기화 (Bug 7)
                         savedTranslationResults = null;

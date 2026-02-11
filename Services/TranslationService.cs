@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.RegularExpressions;
 using Newtonsoft.Json.Linq;
 
 namespace GeminiWebTranslator
@@ -46,7 +47,7 @@ namespace GeminiWebTranslator
 
             // Setup Context
             if (existingResults == null || existingResults.Count == 0) _context.Reset();
-            
+
             int chunkSize = _context.GetOptimalChunkSize();
             var chunks = TextHelper.SplitIntoChunks(text, chunkSize);
             _context.TotalChunks = chunks.Count;
@@ -95,14 +96,14 @@ namespace GeminiWebTranslator
                 _context.RecordSuccess(sw.ElapsedMilliseconds);
 
                 var cleaned = TranslationCleaner.Clean(response);
-                
+
                 // Validation (Log only)
                 var (isValid, errMsg) = TranslationCleaner.Validate(cleaned);
                 if (!isValid && i == 0) OnLog?.Invoke($"[Warning] {errMsg}");
 
                 results.Add(cleaned);
                 _context.AddPreviousChunk(cleaned);
-                
+
                 OnChunkTranslated?.Invoke(cleaned);
             }
 
@@ -121,7 +122,7 @@ namespace GeminiWebTranslator
             string? gameName)
         {
             OnStatus?.Invoke("JSON 분석 및 사전 세팅 중...", Color.Aqua);
-            
+
             // 샘플링: JSON 내의 첫 5개 문자열 추출
             var samples = new List<string>();
             ExtractJsonSamples(token, samples, 5);
@@ -129,9 +130,9 @@ namespace GeminiWebTranslator
             if (samples.Count > 0)
             {
                 var setupPrompt = Services.PromptService.BuildFileTranslationSetupPrompt(
-                    string.Join("\n", samples), 
-                    targetLang, 
-                    style, 
+                    string.Join("\n", samples),
+                    targetLang,
+                    style,
                     gameName);
 
                 try
@@ -174,45 +175,122 @@ namespace GeminiWebTranslator
         }
 
         /// <summary>
+        /// 기존 번역 파일(_ko.json)을 로드하여 진행 상황을 복구합니다.
+        /// </summary>
+        public int TryRecoverJsonTranslations(JToken source, string filePath)
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(filePath) ?? string.Empty;
+                string fileName = Path.GetFileNameWithoutExtension(filePath);
+                string koPath = Path.Combine(dir, $"{fileName}_ko.json");
+
+                if (!File.Exists(koPath)) return 0;
+
+                var koJson = JToken.Parse(File.ReadAllText(koPath));
+                int recoveredCount = ApplyExistingTranslations(source, koJson);
+
+                if (recoveredCount > 0)
+                    OnLog?.Invoke($"[JSON] 기존 번역 파일에서 {recoveredCount}개의 항목을 복구했습니다.");
+
+                return recoveredCount;
+            }
+            catch (Exception ex)
+            {
+                OnLog?.Invoke($"[JSON] 복구 중 오류: {ex.Message}");
+                return 0;
+            }
+        }
+
+        private int ApplyExistingTranslations(JToken source, JToken target)
+        {
+            if (source.Type != target.Type) return 0;
+            int count = 0;
+
+            if (source.Type == JTokenType.Object && target.Type == JTokenType.Object)
+            {
+                foreach (var prop in source.Children<JProperty>())
+                {
+                    var targetProp = ((JObject)target).Property(prop.Name);
+                    if (targetProp != null)
+                    {
+                        count += ApplyExistingTranslations(prop.Value, targetProp.Value);
+                    }
+                }
+            }
+            else if (source.Type == JTokenType.Array && target.Type == JTokenType.Array)
+            {
+                var sArr = (JArray)source;
+                var tArr = (JArray)target;
+                for (int i = 0; i < Math.Min(sArr.Count, tArr.Count); i++)
+                {
+                    count += ApplyExistingTranslations(sArr[i], tArr[i]);
+                }
+            }
+            else if (source.Type == JTokenType.String)
+            {
+                var sVal = source.Value<string>();
+                var tVal = target.Value<string>();
+
+                // 번역 완료 판정: 일본어가 없고, 원문과 다른 경우
+                if (!string.IsNullOrWhiteSpace(tVal) && tVal != sVal && tVal != "XXX" &&
+                    !Regex.IsMatch(tVal, @"[\u3040-\u309F\u30A0-\u30FF]"))
+                {
+                    ((JValue)source).Value = tVal;
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        /// <summary>
         /// Translates a JSON object recursively.
         /// </summary>
         public async Task TranslateJsonAsync(
-            JToken token, 
-            string targetLang, 
+            JToken token,
+            string targetLang,
             string style,
             Func<string, Task<string>> contentGenerator,
             CancellationToken ct)
         {
-             if (token.Type == JTokenType.Object)
-             {
-                 foreach (var c in token.Children<JProperty>())
-                 {
-                     if (c.Value != null) await TranslateJsonAsync(c.Value, targetLang, style, contentGenerator, ct);
-                 }
-             }
-             else if (token.Type == JTokenType.Array)
-             {
-                 foreach (var c in token.Children())
-                 {
-                     await TranslateJsonAsync(c, targetLang, style, contentGenerator, ct);
-                 }
-             }
-             else if (token.Type == JTokenType.String)
-             {
-                 if (ct.IsCancellationRequested) throw new OperationCanceledException();
+            if (token.Type == JTokenType.Object)
+            {
+                foreach (var c in token.Children<JProperty>())
+                {
+                    if (c.Value != null) await TranslateJsonAsync(c.Value, targetLang, style, contentGenerator, ct);
+                }
+            }
+            else if (token.Type == JTokenType.Array)
+            {
+                foreach (var c in token.Children())
+                {
+                    await TranslateJsonAsync(c, targetLang, style, contentGenerator, ct);
+                }
+            }
+            else if (token.Type == JTokenType.String)
+            {
+                if (ct.IsCancellationRequested) throw new OperationCanceledException();
 
-                 var v = token.Value<string>();
-                 if (!string.IsNullOrWhiteSpace(v))
-                 {
-                     OnStatus?.Invoke("JSON 처리 중...", Color.Orange);
-                     
-                     // 중앙 프롬프트 서비스를 사용하여 고품질 번역 유도
-                     string prompt = Services.PromptService.BuildTranslationPrompt(v, targetLang, style);
-                     
-                     string result = await contentGenerator(prompt);
-                     ((JValue)token).Value = TranslationCleaner.Clean(result).Trim();
-                 }
-             }
+                var v = token.Value<string>();
+                // 이미 번역된 항목(복구된 항목)은 스킵
+                if (!string.IsNullOrWhiteSpace(v) && v != "XXX" &&
+                    !Regex.IsMatch(v, @"[\u3040-\u309F\u30A0-\u30FF]"))
+                {
+                    // 이미 번역된 것으로 간주 (복구되었거나 특수 케이스)
+                    return;
+                }
+
+                if (!string.IsNullOrWhiteSpace(v))
+                {
+                    OnStatus?.Invoke("JSON 처리 중...", Color.Orange);
+
+                    // 중앙 프롬프트 서비스를 사용하여 고품질 번역 유도
+                    string prompt = Services.PromptService.BuildTranslationPrompt(v, targetLang, style);
+
+                    string result = await contentGenerator(prompt);
+                    ((JValue)token).Value = TranslationCleaner.Clean(result).Trim();
+                }
+            }
         }
     }
 }

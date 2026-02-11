@@ -7,7 +7,7 @@ namespace GeminiWebTranslator.Automation
     public static class GeminiScripts
     {
         #region 공통 선택자 (통합)
-        
+
         /// <summary>
         /// 입력창 선택자 목록 (우선순위 순)
         /// </summary>
@@ -287,6 +287,35 @@ namespace GeminiWebTranslator.Automation
                 return input.textContent.trim() === '' || input.classList.contains('ql-blank');
             })();
         ";
+
+        /// <summary>
+        /// 페이지 상태를 종합적으로 진단합니다.
+        /// </summary>
+        public const string DiagnosePageStateScript = @"
+            (function() {
+                const result = {
+                    inputReady: !!(document.querySelector('.ql-editor') || document.querySelector('div[contenteditable=""true""]')),
+                    isGenerating: (function() {
+                        const sendBtn = document.querySelector('.send-button');
+                        if (sendBtn && sendBtn.classList.contains('stop')) return true;
+                        
+                        const lastMarkdown = [...document.querySelectorAll('.markdown')].pop();
+                        if (lastMarkdown && lastMarkdown.getAttribute('aria-busy') === 'true') return true;
+                        
+                        const stopBtn = document.querySelector('button[aria-label*=""중지""], button[aria-label*=""Stop""]');
+                        if (stopBtn && stopBtn.offsetParent !== null && !stopBtn.disabled) return true;
+                        
+                        return false;
+                    })(),
+                    hasError: (function() {
+                        const err = document.querySelector('m-snackbar, snack-bar, [role=""alert""], .simple-message.error');
+                        return !!(err && err.offsetParent !== null && err.innerText.trim().length > 0);
+                    })(),
+                    loginNeeded: !!(document.querySelector('button[aria-label*=""로그인""], button[aria-label*=""Sign in""]') || 
+                                   document.querySelector('signed-out-dialog'))
+                };
+                return JSON.stringify(result);
+            })()";
 
         #endregion
 
