@@ -13,6 +13,9 @@ namespace GeminiWebTranslator
 {
     public class TsvTranslationService
     {
+        private const int ProgressFileMaxBytes = 10 * 1024 * 1024;         // 10MB 하드 제한
+        private const int ProgressFileTrimTargetBytes = 9 * 1024 * 1024;   // 정리 후 목표치 (히스테리시스)
+
         public event Action<string>? OnLog;
         public event Action<string, Color>? OnStatus;
         public event Action<string>? OnPartialResult; // To update UI with progress
@@ -21,6 +24,15 @@ namespace GeminiWebTranslator
         // [OPT-1] 태그 검증용 정적 Regex (매번 생성 방지)
         private static readonly Regex TagRegex = new Regex(
             @"#n|#[1-9]|@\(|@\)|<color=[^>]+>|<\/color>|#!ALB\([^)]+\)",
+            RegexOptions.Compiled);
+        private static readonly Regex LeadingListPrefixRegex = new Regex(
+            @"^(?:[-*•]\s*|\d+[.)]\s*)+",
+            RegexOptions.Compiled);
+        private static readonly Regex IdPrefixStripRegex = new Regex(
+            @"^(?:#|ID:|No\.|id_|ID_|번호|Line)\s*",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex EmbeddedIdRegex = new Regex(
+            @"\d{3,}",
             RegexOptions.Compiled);
 
         public class TsvState
@@ -111,8 +123,36 @@ namespace GeminiWebTranslator
 
         private static async Task SaveStringMapAtomicAsync(string path, Dictionary<string, string> map, CancellationToken ct)
         {
-            var json = Newtonsoft.Json.JsonConvert.SerializeObject(map, Newtonsoft.Json.Formatting.Indented);
+            var json = Newtonsoft.Json.JsonConvert.SerializeObject(map, Newtonsoft.Json.Formatting.None);
             await WriteTextAtomicWithRetryAsync(path, json, ct);
+        }
+
+        private static async Task<int> SaveProgressMapAtomicWithLimitAsync(string path, Dictionary<string, string> map, CancellationToken ct)
+        {
+            int removedCount = 0;
+            string json = Newtonsoft.Json.JsonConvert.SerializeObject(map, Newtonsoft.Json.Formatting.None);
+            int bytes = Encoding.UTF8.GetByteCount(json);
+
+            if (bytes > ProgressFileMaxBytes)
+            {
+                // 오래된 항목부터 정리 (Dictionary 삽입 순서 기준)
+                while (bytes > ProgressFileTrimTargetBytes && map.Count > 0)
+                {
+                    int chunk = Math.Max(1, map.Count / 20); // 한 번에 5% 제거
+                    for (int i = 0; i < chunk && map.Count > 0; i++)
+                    {
+                        var oldestKey = map.Keys.First();
+                        map.Remove(oldestKey);
+                        removedCount++;
+                    }
+
+                    json = Newtonsoft.Json.JsonConvert.SerializeObject(map, Newtonsoft.Json.Formatting.None);
+                    bytes = Encoding.UTF8.GetByteCount(json);
+                }
+            }
+
+            await WriteTextAtomicWithRetryAsync(path, json, ct);
+            return removedCount;
         }
 
         private static async Task SaveCheckpointAtomicAsync(string path, StreamCheckpoint checkpoint, CancellationToken ct)
@@ -184,6 +224,48 @@ namespace GeminiWebTranslator
         private static string BuildRetryReason(int line, string reason)
         {
             return $"line={line};reason={reason}";
+        }
+
+        private static bool TryClassifyGenerationFailure(string? response, out string reasonCode)
+        {
+            reasonCode = string.Empty;
+            if (string.IsNullOrWhiteSpace(response))
+            {
+                reasonCode = "empty_response";
+                return true;
+            }
+
+            var text = response.Trim();
+            string[] failureMarkers =
+            {
+                "응답 없음",
+                "시간 초과",
+                "대기 시간",
+                "메시지 전송 트리거에 실패",
+                "서버 접수 신호를 감지하지 못",
+                "생성하다 멈췄습니다",
+                "__RETRY_NO_RESPONSE_20S__"
+            };
+
+            foreach (var marker in failureMarkers)
+            {
+                if (text.IndexOf(marker, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    reasonCode = marker.Replace(" ", "_");
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static string NormalizeReasonToken(string reason)
+        {
+            if (string.IsNullOrWhiteSpace(reason)) return "unknown";
+
+            var normalized = Regex.Replace(reason, @"[^\w가-힣]+", "_").Trim('_');
+            if (normalized.Length > 48) normalized = normalized.Substring(0, 48);
+            return string.IsNullOrWhiteSpace(normalized) ? "unknown" : normalized;
         }
 
         private static void TrimOutputFileToLines(string path, int keepLines, Encoding encoding, string newLine)
@@ -477,6 +559,7 @@ namespace GeminiWebTranslator
             var translationCache = new Dictionary<string, string>(); // EC-2
             var chunkContext = new ChunkContext(5); // EC-9
             int processedLines = 0;
+            int consecutiveTransportFailures = 0;
 
             // [EC-2] 기존 결과 파일에서 캐시 복구 시도 (정확도 향상을 위해)
             // if (linesToSkip > 0) ... (추후 고도화 가능)
@@ -555,6 +638,9 @@ namespace GeminiWebTranslator
                         .ToList();
 
                     var results = new Dictionary<string, string>();
+                    bool transportFailureDetected = false;
+                    bool circuitResetTriggered = false;
+                    string batchFailureReason = "번역실패_최대재시도";
                     if (itemsToTranslate.Count > 0)
                     {
                         // 캐시 먼저 확인
@@ -569,7 +655,7 @@ namespace GeminiWebTranslator
 
                         // 실질적 번역 루프 (배치 내에서 완결)
                         int localRetry = 0;
-                        const int maxLocalRetry = 3;
+                        const int maxLocalRetry = 1;
 
                         while (needsTranslation.Count > 0 && localRetry < maxLocalRetry)
                         {
@@ -583,8 +669,25 @@ namespace GeminiWebTranslator
                                     promptText.ToString(), targetLang, style, PrepareEffectiveGlossary(glossary, promptText.ToString()),
                                     gameName, "TSV", previousContext: contextStr);
 
-                                string response = await generator(finalPrompt);
-                                response = TranslationCleaner.ExtractCodeBlock(response);
+                                string rawResponse = await generator(finalPrompt);
+                                if (TryClassifyGenerationFailure(rawResponse, out var failureCode))
+                                {
+                                    transportFailureDetected = true;
+                                    batchFailureReason = $"전송응답오류_{NormalizeReasonToken(failureCode)}";
+                                    OnLog?.Invoke($"[SENDGUARD] 배치 {batchCount} 생성 실패 감지: {failureCode} — 파싱 생략, 재개 큐로 위임");
+                                    localRetry = maxLocalRetry;
+                                    break;
+                                }
+
+                                string response = TranslationCleaner.ExtractCodeBlock(rawResponse);
+                                if (TryClassifyGenerationFailure(response, out failureCode))
+                                {
+                                    transportFailureDetected = true;
+                                    batchFailureReason = $"전송응답오류_{NormalizeReasonToken(failureCode)}";
+                                    OnLog?.Invoke($"[SENDGUARD] 배치 {batchCount} 코드블록 추출 후 실패 응답 감지: {failureCode} — 파싱 생략");
+                                    localRetry = maxLocalRetry;
+                                    break;
+                                }
 
                                 var parsedResults = ParseTsvResponse(response, needsTranslation, out int matchedCount);
 
@@ -592,11 +695,9 @@ namespace GeminiWebTranslator
                                 double matchRate = (double)matchedCount / needsTranslation.Count;
                                 if (matchRate < 0.5 && needsTranslation.Count > 3)
                                 {
-                                    OnLog?.Invoke($"[GUARD] 배치 {batchCount} 매칭률 {matchRate:P0} ({matchedCount}/{needsTranslation.Count}) — 전체 거부 후 재시도");
-                                    if (sessionResetter != null) await sessionResetter();
-                                    await Task.Delay(2000, ct);
-                                    localRetry++;
-                                    continue; // 전체 배치 재시도
+                                    OnLog?.Invoke($"[GUARD] 배치 {batchCount} 매칭률 {matchRate:P0} ({matchedCount}/{needsTranslation.Count}) — 현재 채팅 유지, 다음 배치/재개로 위임");
+                                    localRetry = maxLocalRetry;
+                                    break; // 즉시 재시도/새 채팅 생성 금지
                                 }
 
                                 int batchSuccessCount = 0;
@@ -616,19 +717,35 @@ namespace GeminiWebTranslator
 
                                 if (needsTranslation.Count > 0)
                                 {
-                                    OnLog?.Invoke($"[WARN] 배치 {batchCount} 일부 누락 ({needsTranslation.Count}개 남음) → 재시도 {localRetry + 1}/{maxLocalRetry}");
-                                    if (sessionResetter != null) await sessionResetter();
-                                    await Task.Delay(1000, ct);
+                                    OnLog?.Invoke($"[WARN] 배치 {batchCount} 일부 누락 ({needsTranslation.Count}개 남음) → 동일 채팅 유지, 재개 큐로 위임");
                                 }
                             }
                             catch (Exception ex)
                             {
-                                OnLog?.Invoke($"[WARN] 배치 {batchCount} 오류: {ex.Message} → 재시도 {localRetry + 1}/{maxLocalRetry}");
-                                if (sessionResetter != null) await sessionResetter();
-                                await Task.Delay(2000, ct);
+                                OnLog?.Invoke($"[WARN] 배치 {batchCount} 오류: {ex.Message} → 동일 채팅 유지, 재개 큐로 위임");
+                                if (TryClassifyGenerationFailure(ex.Message, out var errorCode))
+                                {
+                                    transportFailureDetected = true;
+                                    batchFailureReason = $"전송응답오류_{NormalizeReasonToken(errorCode)}";
+                                }
                             }
                             localRetry++;
                         }
+                    }
+
+                    if (transportFailureDetected)
+                    {
+                        consecutiveTransportFailures++;
+                        OnLog?.Invoke($"[SENDGUARD] 연속 전송/응답 실패: {consecutiveTransportFailures}회");
+                        if (consecutiveTransportFailures >= 2 && sessionResetter != null)
+                        {
+                            circuitResetTriggered = true;
+                            OnLog?.Invoke("[SENDGUARD] 회로 차단기 발동: 연속 실패 2회 -> 세션 갱신 1회 예약");
+                        }
+                    }
+                    else
+                    {
+                        consecutiveTransportFailures = 0;
                     }
 
                     // 4c. 결과 반영 및 출력 파일 기록 (Atomic Write)
@@ -656,7 +773,7 @@ namespace GeminiWebTranslator
                         else if (!string.IsNullOrWhiteSpace(it.JpText) && it.JpText != "XXX")
                         {
                             parts[krIdx] = it.JpText; // 결국 실패한 경우 원문 유지
-                            string retryReason = BuildRetryReason(it.LineNo, "번역실패_최대재시도");
+                            string retryReason = BuildRetryReason(it.LineNo, batchFailureReason);
                             if (!retryQueue.TryGetValue(it.Id, out var reason) || reason != retryReason)
                             {
                                 retryQueue[it.Id] = retryReason;
@@ -681,7 +798,11 @@ namespace GeminiWebTranslator
                     {
                         if (progressDirty)
                         {
-                            await SaveStringMapAtomicAsync(progressPath, persistedProgress, ct);
+                            int removed = await SaveProgressMapAtomicWithLimitAsync(progressPath, persistedProgress, ct);
+                            if (removed > 0)
+                            {
+                                OnLog?.Invoke($"[TSV] progress 용량 제한 적용: 오래된 엔트리 {removed}개 정리 (<=10MB)");
+                            }
                         }
                         if (retryDirty)
                         {
@@ -726,6 +847,11 @@ namespace GeminiWebTranslator
 
                     // WebView 안정화를 위한 지연 및 리셋 주기 조정
                     if (isWebViewMode) await Task.Delay(1000, ct); 
+                    if (circuitResetTriggered && sessionResetter != null)
+                    {
+                        await sessionResetter();
+                        consecutiveTransportFailures = 0;
+                    }
                     if (batchCount % 15 == 0 && sessionResetter != null) await sessionResetter();
                 }
             }
@@ -745,26 +871,40 @@ namespace GeminiWebTranslator
                 .Where(l => !TranslationCleaner.IsPossibleMetaText(l))
                 .ToList();
 
+            // 코드 스니펫 뒤에 붙는 설명문(질문/제안) 제거:
+            // 데이터 라인이 충분히 많은 경우에는 비데이터 라인을 제외해 파싱 안정성 확보
+            int initialLineCount = responseLines.Count;
+            var dataLikeLines = new List<string>();
+            var nonDataLikeLines = new List<string>();
+            foreach (var line in responseLines)
+            {
+                if (TrySplitResponseLine(line, batchLookup, out var parsedId, out _) && batchLookup.ContainsKey(parsedId))
+                {
+                    dataLikeLines.Add(line);
+                }
+                else
+                {
+                    nonDataLikeLines.Add(line);
+                }
+            }
+
+            if (dataLikeLines.Count >= Math.Max(3, (int)Math.Ceiling(initialLineCount * 0.6)) &&
+                nonDataLikeLines.Count > 0)
+            {
+                responseLines = dataLikeLines;
+                OnLog?.Invoke($"[PARSE] 설명/비데이터 라인 {nonDataLikeLines.Count}개 제거 후 파싱 (data={dataLikeLines.Count}, total={initialLineCount})");
+            }
+
             var idMatchedResults = new Dictionary<string, string>();
             var unmatchedLines = new List<(int Index, string Line)>();
 
             for (int i = 0; i < responseLines.Count; i++)
             {
                 var line = responseLines[i];
-                var sep = line.IndexOf('|');
-                if (sep > 0)
+                if (TrySplitResponseLine(line, batchLookup, out var id, out var trans))
                 {
-                    var id = line.Substring(0, sep).Trim();
-                    // ID 변형 방어 (EC-1 강화: 더 많은 변형 대응)
-                    if (!batchLookup.ContainsKey(id))
-                    {
-                        var stripped = Regex.Replace(id, @"^(?:#|ID:|No\.|id_|ID_|번호|Line)\s*", "", RegexOptions.IgnoreCase).Trim();
-                        if (batchLookup.ContainsKey(stripped)) id = stripped;
-                    }
-
                     if (batchLookup.ContainsKey(id))
                     {
-                        var trans = TranslationCleaner.Clean(line.Substring(sep + 1).Trim());
                         idMatchedResults[id] = trans;
                     }
                     else
@@ -803,9 +943,15 @@ namespace GeminiWebTranslator
                     {
                         if (unmatchedBatchIds.Count == 0) break;
 
-                        var sep = line.IndexOf('|');
-                        string trans = sep > 0 ? line.Substring(sep + 1).Trim() : line.Trim();
-                        trans = TranslationCleaner.Clean(trans);
+                        string trans;
+                        if (TrySplitResponseLine(line, batchLookup, out _, out var parsedTrans))
+                        {
+                            trans = parsedTrans;
+                        }
+                        else
+                        {
+                            trans = TranslationCleaner.Clean(line.Trim());
+                        }
 
                         if (!string.IsNullOrEmpty(trans) && !TranslationCleaner.IsPossibleMetaText(trans))
                         {
@@ -839,7 +985,95 @@ namespace GeminiWebTranslator
             }
 
             matchedCount = results.Count;
+            if (matchedCount == 0 || matchedCount < Math.Max(1, batch.Count / 3))
+            {
+                OnLog?.Invoke($"[PARSE] 저매칭 상세: batch={batch.Count}, lines={responseLines.Count}, idMatched={idMatchedResults.Count}, unmatched={unmatchedLines.Count}, final={matchedCount}");
+            }
             return results;
+        }
+
+        private static bool TrySplitResponseLine(
+            string rawLine,
+            Dictionary<string, string> batchLookup,
+            out string id,
+            out string trans)
+        {
+            id = string.Empty;
+            trans = string.Empty;
+            if (string.IsNullOrWhiteSpace(rawLine)) return false;
+
+            var line = rawLine.Trim();
+            // 흔한 전각/박스 구분자 정규화
+            line = line.Replace('｜', '|').Replace('│', '|').Replace('¦', '|');
+
+            // 마크다운 테이블 형태: | id | trans |
+            if (line.StartsWith("|"))
+            {
+                var tableParts = line.Split('|');
+                if (tableParts.Length >= 3)
+                {
+                    var tableId = NormalizeResponseId(tableParts[1], batchLookup);
+                    var tableTrans = TranslationCleaner.Clean(tableParts[2].Trim());
+                    if (!string.IsNullOrEmpty(tableId) && !string.IsNullOrEmpty(tableTrans))
+                    {
+                        id = tableId;
+                        trans = tableTrans;
+                        return true;
+                    }
+                }
+            }
+
+            int sep = line.IndexOf('|');
+            if (sep <= 0)
+            {
+                sep = line.IndexOf('\t');
+            }
+
+            if (sep <= 0 || sep >= line.Length - 1)
+            {
+                return false;
+            }
+
+            var rawId = line.Substring(0, sep);
+            var rawTrans = line.Substring(sep + 1);
+
+            var normalizedId = NormalizeResponseId(rawId, batchLookup);
+            var cleanedTrans = TranslationCleaner.Clean(rawTrans.Trim());
+            if (string.IsNullOrEmpty(normalizedId) || string.IsNullOrEmpty(cleanedTrans))
+            {
+                return false;
+            }
+
+            id = normalizedId;
+            trans = cleanedTrans;
+            return true;
+        }
+
+        private static string NormalizeResponseId(string rawId, Dictionary<string, string> batchLookup)
+        {
+            if (string.IsNullOrWhiteSpace(rawId)) return string.Empty;
+
+            var id = rawId.Trim();
+            id = LeadingListPrefixRegex.Replace(id, "");
+            id = id.Trim().Trim('`', '"', '\'', '[', ']', '(', ')', '{', '}', ':', ';');
+            id = IdPrefixStripRegex.Replace(id, "").Trim();
+
+            if (batchLookup.ContainsKey(id))
+            {
+                return id;
+            }
+
+            // 응답에 불필요 텍스트가 섞인 경우 숫자 ID 추출
+            foreach (Match m in EmbeddedIdRegex.Matches(id))
+            {
+                var candidate = m.Value;
+                if (batchLookup.ContainsKey(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            return id;
         }
 
 

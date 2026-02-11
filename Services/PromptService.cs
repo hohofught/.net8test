@@ -47,7 +47,8 @@ namespace GeminiWebTranslator.Services
                 sb.AppendLine("5. 반드시 ```code 블록 안에 결과만 출력. 블록 밖 텍스트·설명·인사 금지");
                 sb.AppendLine("6. **절대로 인사말이나 부연 설명, 질문을 하지 마세요.** (예: '번역해 드렸습니다', '계속할까요?' 절대 금지)");
                 sb.AppendLine("7. 줄을 합치거나 생략하지 마세요. 번역할 수 없는 항목도 ID|원문 형태로 그대로 출력");
-                sb.AppendLine("8. **사용자에게 질문하지 말고 오직 번역 데이터만 즉시 출력하세요.**");
+                sb.AppendLine("8. **반드시 어떠한 다른 대답 외 번역 데이터만 즉시 출력하세요.**");
+                sb.AppendLine("10. 코드블록 종료 후 공백 포함 어떤 문자도 출력 금지 (질문·제안 문장 절대 금지)");
 
                 // 번역 데이터
                 sb.AppendLine();

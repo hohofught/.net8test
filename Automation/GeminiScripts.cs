@@ -100,14 +100,80 @@ namespace GeminiWebTranslator.Automation
         /// </summary>
         public const string SendButtonScript = @"
             (function() {
-                const btn = document.querySelector('.send-button:not(.stop)') ||
-                           document.querySelector('button[aria-label=""보내기""]') ||
-                           document.querySelector('button[aria-label=""Send message""]');
-                if (btn && !btn.disabled) {
-                    btn.click();
+                const selectors = [
+                    '.send-button:not(.stop)',
+                    'button.send-button:not(.stop)',
+                    'button[aria-label=""보내기""]',
+                    'button[aria-label=""Send message""]',
+                    'button[aria-label=""Send""]',
+                    'button[aria-label=""전송""]',
+                    'mwc-icon-button.send-button',
+                    'button[data-test-id=""send-button""]',
+                    '.input-area button:last-child',
+                    'button[type=""submit""]'
+                ];
+
+                let btn = null;
+                for (const sel of selectors) {
+                    const candidate = document.querySelector(sel);
+                    if (candidate &&
+                        !candidate.disabled &&
+                        candidate.offsetParent !== null &&
+                        !candidate.classList.contains('stop')) {
+                        btn = candidate;
+                        break;
+                    }
+                }
+
+                if (btn) {
+                    try {
+                        btn.click();
+                    } catch {
+                        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                    }
                     return 'clicked';
                 }
+
+                // 버튼 탐색 실패 시 Enter 전송으로 폴백
+                const input = document.querySelector('.ql-editor, div[contenteditable=""true""]');
+                if (input) {
+                    input.focus();
+                    input.dispatchEvent(new KeyboardEvent('keydown', {
+                        key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+                        bubbles: true, cancelable: true
+                    }));
+                    input.dispatchEvent(new KeyboardEvent('keyup', {
+                        key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+                        bubbles: true, cancelable: true
+                    }));
+                    return 'enter_sent';
+                }
                 return 'not_found';
+            })();
+        ";
+
+        /// <summary>
+        /// 전송 단계 진단: 입력/버튼/stop 상태를 수집합니다.
+        /// </summary>
+        public const string DiagnoseSendStateScript = @"
+            (function() {
+                const sendBtn = document.querySelector('.send-button');
+                const activeBtn = document.querySelector('.send-button:not(.stop)') ||
+                                  document.querySelector('button[aria-label=""보내기""]') ||
+                                  document.querySelector('button[aria-label=""Send message""]') ||
+                                  document.querySelector('button[type=""submit""]');
+                const input = document.querySelector('.ql-editor, div[contenteditable=""true""]');
+                const inputText = input ? (input.innerText || input.textContent || '').trim() : '';
+
+                return JSON.stringify({
+                    hasSendButton: !!sendBtn,
+                    sendButtonVisible: !!(sendBtn && sendBtn.offsetParent !== null),
+                    sendButtonDisabled: !!(sendBtn && sendBtn.disabled),
+                    hasActiveSendButton: !!(activeBtn && activeBtn.offsetParent !== null && !activeBtn.disabled),
+                    isStopMode: !!(sendBtn && sendBtn.classList.contains('stop')),
+                    inputReady: !!(input && input.getAttribute('contenteditable') === 'true'),
+                    inputLength: inputText.length
+                });
             })();
         ";
 
@@ -218,6 +284,11 @@ namespace GeminiWebTranslator.Automation
                 // 3. 중지 버튼 노출 확인
                 const stopBtn = document.querySelector('button[aria-label*=""중지""], button[aria-label*=""Stop""]');
                 if (stopBtn && stopBtn.offsetParent !== null && !stopBtn.disabled) return true;
+
+                // 4. 로딩 인디케이터 + 전송 버튼 비활성 조합
+                const loadingIndicators = document.querySelectorAll('.loading, .spinner, [aria-busy=""true""], mat-progress-spinner, mdc-circular-progress');
+                const activeSend = document.querySelector('.send-button:not(.stop), button[aria-label=""보내기""], button[aria-label=""Send message""]');
+                if (loadingIndicators.length > 0 && !activeSend) return true;
                 
                 return false;
             })();

@@ -14,6 +14,7 @@ public class GeminiAutomation : IGeminiAutomation
     private readonly WebView2 _webView;
     private const int MaxWaitSeconds = 120; // 서버 응답 최대 대기 시간 (초)
     private const int PollIntervalMs = 80;  // 브라우저 상태 확인 간격 (ms)
+    private const string RetryNoResponse20sMarker = "__RETRY_NO_RESPONSE_20S__";
     private readonly SemaphoreSlim _lock = new(1, 1); // 동시성 제어를 위한 세마포어
 
     // 빈번한 스크립트 생성을 고려한 리소스 최적화용 빌더
@@ -347,16 +348,56 @@ public class GeminiAutomation : IGeminiAutomation
                 Log($"[Model] 감지 오류 (번역은 계속됨): {modelEx.Message}");
             }
 
-            // 새 응답 시작을 감지하기 위해 현재 답변 항목의 개수를 미리 확인
-            int preCount = await GetResponseCountAsync();
+            string response = string.Empty;
+            const int maxNoResponseRetries = 1;
 
-            // 브라우저에 텍스트 주입 및 전송 버튼 트리거
-            await SendMessageAsync(prompt);
+            for (int retryAttempt = 0; retryAttempt <= maxNoResponseRetries; retryAttempt++)
+            {
+                // 새 응답 시작을 감지하기 위해 현재 기준선 캡처
+                int preCount = await GetResponseCountAsync();
+                string preResponse = await GetLatestResponseAsync();
 
-            OnStreamingUpdate?.Invoke("⏳ 생성 중...");
+                // [1단계] 전송 성공 감지: 입력 주입 + 전송 트리거 성공 여부
+                bool sendTriggered = await SendMessageAsync(prompt);
+                if (!sendTriggered)
+                {
+                    var sendState = await DiagnoseSendStateAsync();
+                    Log($"[SendPhase] 전송 성공 감지 실패: {sendState}");
+                    return "응답 없음: 메시지 전송 트리거에 실패했습니다.";
+                }
+                Log("[SendPhase] 전송 성공 감지: 입력/전송 트리거 완료");
 
-            // 답변 생성이 완료될 때까지 상태 폴링 대기
-            var response = await WaitForResponseAfterSendAsync(preCount);
+                // [2단계] 전송 완료 감지: 서버 수신 시작(생성중/응답카운트/응답변화) 확인
+                var sendAccepted = await WaitForSendAcceptedAsync(preCount, preResponse);
+                if (!sendAccepted.Accepted)
+                {
+                    var sendState = await DiagnoseSendStateAsync();
+                    Log($"[SendPhase] 전송 완료 감지 실패: {sendAccepted.Reason}, state={sendState}");
+                    return "응답 없음: 전송은 시도되었지만 서버 접수 신호를 감지하지 못했습니다.";
+                }
+
+                Log($"[SendPhase] 전송 완료 감지: {sendAccepted.Reason}");
+                OnStreamingUpdate?.Invoke("⏳ 생성 중...");
+
+                // 답변 생성이 완료될 때까지 상태 폴링 대기
+                response = await WaitForResponseAfterSendAsync(preCount);
+
+                if (response == RetryNoResponse20sMarker && retryAttempt < maxNoResponseRetries)
+                {
+                    Log($"[Retry] 비생성 20초 무응답 감지 - 세션 리셋 후 재시도 ({retryAttempt + 1}/{maxNoResponseRetries})");
+                    OnStreamingUpdate?.Invoke("🔁 20초 무응답 감지 - 재시도 중...");
+                    await StartNewChatAsync(skipLock: true);
+                    await Task.Delay(500);
+                    continue;
+                }
+
+                break;
+            }
+
+            if (response == RetryNoResponse20sMarker)
+            {
+                response = "응답 없음: 20초 동안 생성이 시작되지 않아 재시도 후 중단했습니다.";
+            }
 
             // 타임아웃/오류 감지 시 카운터만 증가 (복구는 호출자에게 위임)
             // ⚠️ HandleTimeoutAsync() 직접 호출 금지: _lock 교착 상태 발생
@@ -524,7 +565,7 @@ public class GeminiAutomation : IGeminiAutomation
             var cleanPrompt = EscapeJsString(prompt);
 
             // 1. 첨부 파일이 있는지 먼저 확인
-            var hasAttachment = await _webView.CoreWebView2.ExecuteScriptAsync(@"
+            var hasAttachmentRaw = await _webView.CoreWebView2.ExecuteScriptAsync(@"
                 (function() {
                     const selectors = [
                         'img[src^=""blob:""]',
@@ -539,18 +580,18 @@ public class GeminiAutomation : IGeminiAutomation
                     return false;
                 })()
             ");
+            var hasAttachment = DecodeScriptString(hasAttachmentRaw);
             Log($"첨부 파일 확인: {hasAttachment}");
 
             // 2. 입력창에 텍스트 삽입 (기존 내용 유지, placeholder만 대체)
             var insertScript = $@"
-                (async function() {{
+                (function() {{
                     const input = document.querySelector('.ql-editor') || 
                                   document.querySelector('div[contenteditable=""true""]');
                     if (!input) return 'no_input';
                     
                     // 입력창 포커스
                     input.focus();
-                    await new Promise(r => setTimeout(r, 50));
                     
                     // 기존 텍스트 확인 (placeholder 제외)
                     const existingText = input.innerText.trim();
@@ -581,68 +622,181 @@ public class GeminiAutomation : IGeminiAutomation
                         data: {cleanPrompt}
                     }}));
                     
-                    return 'text_inserted';
-                }})()";
+                    const textLen = (input.innerText || input.textContent || '').trim().length;
+                    return textLen > 0 ? ('text_inserted:' + textLen) : 'empty_after_insert';
+                }})();";
 
-            var insertResult = await _webView.CoreWebView2.ExecuteScriptAsync(insertScript);
+            var insertResultRaw = await _webView.CoreWebView2.ExecuteScriptAsync(insertScript);
+            var insertResult = DecodeScriptString(insertResultRaw);
             Log($"텍스트 삽입 결과: {insertResult}");
+            if (insertResult.Contains("no_input"))
+            {
+                return false;
+            }
 
             // 3. 잠시 대기 후 전송 버튼 활성화 확인
             await Task.Delay(500);
 
-            // 4. 전송 버튼 클릭 (활성화될 때까지 대기)
-            var sendScript = @"
-                (async function() {
-                    for (let i = 0; i < 20; i++) {
-                        const sendBtn = document.querySelector('.send-button:not(.stop)') ||
-                                       document.querySelector('button[aria-label=""보내기""]') ||
-                                       document.querySelector('button[aria-label=""Send message""]');
-                        
-                        if (sendBtn && !sendBtn.disabled && sendBtn.offsetParent !== null) {
-                            // 버튼이 활성화되면 클릭
-                            sendBtn.click();
-                            return 'sent';
-                        }
-                        await new Promise(r => setTimeout(r, 100));
-                    }
-                    return 'button_not_ready';
-                })()";
-
-            var sendResult = await _webView.CoreWebView2.ExecuteScriptAsync(sendScript);
+            // 4. 전송 버튼 클릭 (활성화될 때까지 C# 폴링)
+            string sendResult = "button_not_ready";
+            for (int i = 0; i < 20; i++)
+            {
+                var sendResultRaw = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.SendButtonScript);
+                sendResult = DecodeScriptString(sendResultRaw);
+                if (sendResult.Contains("clicked") || sendResult.Contains("enter_sent"))
+                {
+                    break;
+                }
+                await Task.Delay(100);
+            }
             Log($"전송 결과: {sendResult}");
 
-            return sendResult.Contains("sent");
+            return sendResult.Contains("clicked") || sendResult.Contains("enter_sent");
         }
         else
         {
             // 일반 모드: 기존 내용 초기화
-            await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.FocusAndClearScript);
+            var clearResultRaw = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.FocusAndClearScript);
+            var clearResult = DecodeScriptString(clearResultRaw);
+            if (!string.Equals(clearResult, "true", StringComparison.OrdinalIgnoreCase))
+            {
+                Log($"[SendPhase] 입력창 초기화 경고: {clearResult}");
+            }
             await Task.Delay(80);
 
-            // 텍스트 데이터를 JS 호환 형식으로 이스케이프하여 주입 (execCommand 사용)
+            // 텍스트 데이터를 JS 호환 형식으로 이스케이프하여 주입
             var cleanPrompt = EscapeJsString(prompt);
             _scriptBuilder.Clear();
             _scriptBuilder.Append(@"(function() {
                 const input = document.querySelector('.ql-editor') || 
                               document.querySelector('div[contenteditable=""true""]');
-                if (!input) return false;
-                input.focus();
-                document.execCommand('insertText', false, ");
+                if (!input) return 'no_input';
+
+                const promptText = ");
             _scriptBuilder.Append(cleanPrompt);
-            _scriptBuilder.Append(@");
-                return true;
+            _scriptBuilder.Append(@";
+
+                input.focus();
+                try {
+                    document.execCommand('insertText', false, promptText);
+                } catch {}
+
+                // execCommand 실패 대비: 직접 DOM 주입
+                const textLenAfterExec = (input.innerText || input.textContent || '').trim().length;
+                if (textLenAfterExec === 0) {
+                    input.innerHTML = '<p>' + promptText.replace(/\n/g, '</p><p>') + '</p>';
+                }
+
+                ['input', 'change', 'keyup'].forEach(evtName => {
+                    input.dispatchEvent(new Event(evtName, { bubbles: true }));
+                });
+                input.dispatchEvent(new InputEvent('input', {
+                    bubbles: true,
+                    cancelable: true,
+                    inputType: 'insertText'
+                }));
+
+                const textLen = (input.innerText || input.textContent || '').trim().length;
+                if (textLen <= 0) return 'empty_after_insert';
+                return 'text_inserted:' + textLen;
             })();");
 
+            string insertResult = "";
             if (_webView?.CoreWebView2 != null)
             {
-                await _webView.CoreWebView2.ExecuteScriptAsync(_scriptBuilder.ToString());
+                var insertResultRaw = await _webView.CoreWebView2.ExecuteScriptAsync(_scriptBuilder.ToString());
+                insertResult = DecodeScriptString(insertResultRaw);
             }
+            Log($"[SendPhase] 텍스트 주입 결과: {insertResult}");
+
+            if (!insertResult.StartsWith("text_inserted:", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
             await Task.Delay(150);
 
             // 엔진 전송 버튼 클릭 트리거
-            _webView?.CoreWebView2?.ExecuteScriptAsync(GeminiScripts.SendButtonScript);
+            var core = _webView?.CoreWebView2;
+            if (core == null)
+            {
+                return false;
+            }
+
+            var sendResultRaw = await core.ExecuteScriptAsync(GeminiScripts.SendButtonScript);
+            var sendResult = DecodeScriptString(sendResultRaw);
+            Log($"[SendPhase] 버튼 전송 결과: {sendResult}");
+
             await Task.Delay(100);
-            return true;
+            return sendResult.Contains("clicked") || sendResult.Contains("enter_sent");
+        }
+    }
+
+    private readonly record struct SendAcceptanceResult(bool Accepted, string Reason);
+
+    /// <summary>
+    /// 전송 완료(서버 접수 시작) 감지:
+    /// 생성중 신호, 응답 카드 증가, 응답 변화 중 하나라도 확인되면 완료로 간주합니다.
+    /// </summary>
+    private async Task<SendAcceptanceResult> WaitForSendAcceptedAsync(int preCount, string preResponse, int timeoutSeconds = 12)
+    {
+        var start = DateTime.Now;
+        int poll = 0;
+        int baselineLen = preResponse?.Length ?? 0;
+
+        while ((DateTime.Now - start).TotalSeconds < timeoutSeconds)
+        {
+            await Task.Delay(150);
+            poll++;
+
+            var currentCount = await GetResponseCountAsync();
+            var isGenerating = await IsGeneratingAsync();
+            var currentResponse = await GetLatestResponseAsync();
+
+            bool countIncreased = currentCount > preCount;
+            bool responseChanged = !string.Equals(currentResponse, preResponse, StringComparison.Ordinal) &&
+                                   !string.IsNullOrWhiteSpace(currentResponse) &&
+                                   (
+                                       baselineLen == 0 ||
+                                       Math.Abs((currentResponse?.Length ?? 0) - baselineLen) >= Math.Max(8, (int)(baselineLen * 0.15))
+                                   );
+
+            if (isGenerating || countIncreased || responseChanged)
+            {
+                string reason = isGenerating ? "생성중 신호 감지" :
+                                countIncreased ? $"응답카드 증가({preCount}->{currentCount})" :
+                                "응답 내용 변화 감지";
+                return new SendAcceptanceResult(true, reason);
+            }
+
+            if (poll % 8 == 0)
+            {
+                var sendState = await DiagnoseSendStateAsync();
+                Log($"[SendPhase] 전송 완료 대기 중... poll={poll}, state={sendState}");
+            }
+        }
+
+        return new SendAcceptanceResult(false, $"{timeoutSeconds}초 내 접수 신호 없음");
+    }
+
+    /// <summary>
+    /// 전송 단계 디버깅용 상태 진단(JSON 문자열 반환)
+    /// </summary>
+    private async Task<string> DiagnoseSendStateAsync()
+    {
+        if (_webView?.CoreWebView2 == null)
+        {
+            return "{\"error\":\"corewebview2_null\"}";
+        }
+
+        try
+        {
+            var result = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.DiagnoseSendStateScript);
+            return DecodeScriptString(result);
+        }
+        catch (Exception ex)
+        {
+            return $"{{\"error\":\"{ex.Message.Replace("\"", "'")}\"}}";
         }
     }
 
@@ -658,6 +812,22 @@ public class GeminiAutomation : IGeminiAutomation
             .Replace("\r", "") // 개행 문자 통합을 위해 캐리지 리턴 제거
             .Replace("\n", "\\n")
             .Replace("\t", "\\t") + "'";
+    }
+
+    private static string DecodeScriptString(string? scriptResult)
+    {
+        if (string.IsNullOrEmpty(scriptResult))
+        {
+            return "";
+        }
+
+        if (scriptResult.StartsWith("\"") && scriptResult.EndsWith("\""))
+        {
+            var unwrapped = scriptResult.Substring(1, scriptResult.Length - 2);
+            return System.Text.RegularExpressions.Regex.Unescape(unwrapped);
+        }
+
+        return scriptResult;
     }
 
     /// <summary>
@@ -695,7 +865,7 @@ public class GeminiAutomation : IGeminiAutomation
 
         // === P0-1: Stuck 부분응답 반환 + 에스컬레이션 ===
         const int MaxStuckSeconds = 15;       // 생성 중 15초 무변화 시 Stuck 판정
-        const int MaxInactiveSeconds = 30;    // 30초 이상 응답 변화 없으면 장애로 판단
+        const int MaxInactiveSeconds = 20;    // 비생성 상태 20초 무응답 시 재시도 신호
         bool responseStarted = false;
 
         // === P0-3: 동적 폴링 간격 ===
@@ -787,6 +957,11 @@ public class GeminiAutomation : IGeminiAutomation
                     else if (inactiveSeconds > 3) currentPollInterval = PollSlowInterval;
                 }
 
+                if (pollCount % 25 == 0)
+                {
+                    Log($"[WaitForResponse] 진행 상태 len={currentResponse.Length}, count={currentCount}, generating={isGenerating}, stable={stableCount}, inactive={inactiveSeconds:F1}s");
+                }
+
                 // === P0-1: Stuck 감지 (생성 중인데 텍스트 변화 없음) ===
                 if (isGenerating && inactiveSeconds > MaxStuckSeconds)
                 {
@@ -802,17 +977,18 @@ public class GeminiAutomation : IGeminiAutomation
                             Log($"[WaitForResponse] 추가 응답 감지: {currentResponse.Length}→{lastCheck.Length}자");
                             currentResponse = lastCheck;
                         }
+                        Log($"[ResponsePhase] 응답 완료 감지(부분 반환): {currentResponse.Length}자");
                         return SanitizeRawResponse(currentResponse);
                     }
                     Log($"[WaitForResponse] 🛑 Stuck 감지 ({MaxStuckSeconds}초간 생성 중 변화 없음, 응답={currentResponse?.Length ?? 0}자)");
                     return "응답 없음: Gemini가 응답을 생성하다 멈췄습니다.";
                 }
 
-                // 무응답 타임아웃
-                if (!responseStarted && inactiveSeconds > MaxInactiveSeconds)
+                // 무응답 타임아웃 (생성 시작조차 안 된 경우만)
+                if (!responseStarted && !isGenerating && inactiveSeconds > MaxInactiveSeconds)
                 {
-                    Log($"[WaitForResponse] 🛑 {MaxInactiveSeconds}초 무응답 타임아웃");
-                    return "응답 없음: 서버 지연 또는 가시적 답변 생성이 감지되지 않았습니다.";
+                    Log($"[WaitForResponse] 🛑 비생성 상태 {MaxInactiveSeconds}초 무응답 -> 재시도 신호");
+                    return RetryNoResponse20sMarker;
                 }
 
                 // 신규 답변이 아직 노출되지 않은 초기 단계 대기
@@ -864,6 +1040,7 @@ public class GeminiAutomation : IGeminiAutomation
                                         continue;
                                     }
                                     await WaitUntilReadyForNextInputAsync();
+                                    Log($"[ResponsePhase] 응답 완료 감지: {sanitized.Length}자");
                                     return sanitized;
                                 }
                             }
@@ -889,6 +1066,7 @@ public class GeminiAutomation : IGeminiAutomation
         if (newResponseDetected && responseStarted && !string.IsNullOrEmpty(lastResponse) && lastResponse != baselineResponse)
         {
             Log($"[WaitForResponse] 타임아웃이지만 응답 존재 ({lastResponse.Length}자) - 반환");
+            Log($"[ResponsePhase] 응답 완료 감지(타임아웃 부분 반환): {lastResponse.Length}자");
             return SanitizeRawResponse(lastResponse);
         }
 
@@ -964,15 +1142,7 @@ public class GeminiAutomation : IGeminiAutomation
     public async Task<string> GetLatestResponseAsync()
     {
         var result = await _webView.CoreWebView2.ExecuteScriptAsync(GeminiScripts.GetResponseScript);
-
-        // 반환된 JSON 형식의 문자열에서 실제 텍스트 내용만 정제
-        if (result != null && result.StartsWith("\"") && result.EndsWith("\""))
-        {
-            result = result.Substring(1, result.Length - 2);
-            result = System.Text.RegularExpressions.Regex.Unescape(result);
-        }
-
-        return result ?? "";
+        return DecodeScriptString(result);
     }
 
     /// <summary>
@@ -2202,8 +2372,7 @@ public class GeminiAutomation : IGeminiAutomation
     {
         try
         {
-            await SendMessageAsync(message, preserveAttachment);
-            return true;
+            return await SendMessageAsync(message, preserveAttachment);
         }
         catch { return false; }
     }
